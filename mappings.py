@@ -125,7 +125,8 @@ AIRPORT_CODES = {
     "CMB": "Colombo Bandaranaike", "DAC": "Dhaka Hazrat Shahjalal", "KTM": "Kathmandu Tribhuvan",
     "MLE": "Male Velana", "RJH": "Rajshahi", "CXB": "Cox's Bazar", "CGP": "Chittagong",
     "JSR": "Jessore", "ZYL": "Sylhet Osmani", "PKR": "Pokhara", "BWA": "Bhairahawa",
-    "BIR": "Biratnagar", "GAN": "Gan Island", "KDM": "Kaadedhdhoo", "IXW": "Jamshedpur",
+    "BIR": "Biratnagar", "PBH": "Paro", "BUT": "Bathpalathang", "YON": "Yonphula",
+    "GLU": "Gelephu", "GAN": "Gan Island", "KDM": "Kaadedhdhoo", "IXW": "Jamshedpur",
     "IXI": "Lilabari", "TEZ": "Tezpur", "RGH": "Balurghat", "COH": "Cooch Behar",
     
     # ===== OCEANIA (Major hubs first) =====
@@ -676,6 +677,7 @@ AIRPORT_TZ_MAP = {
     "CMB": "Asia/Colombo", "DAC": "Asia/Dhaka", "RJH": "Asia/Dhaka", "CXB": "Asia/Dhaka",
     "CGP": "Asia/Dhaka", "JSR": "Asia/Dhaka", "ZYL": "Asia/Dhaka",
     "KTM": "Asia/Kathmandu", "PKR": "Asia/Kathmandu", "BWA": "Asia/Kathmandu", "BIR": "Asia/Kathmandu",
+    "PBH": "Asia/Thimphu", "BUT": "Asia/Thimphu", "YON": "Asia/Thimphu", "GLU": "Asia/Thimphu",
     "MLE": "Indian/Maldives", "GAN": "Indian/Maldives", "KDM": "Indian/Maldives",
     "ISB": "Asia/Karachi", "KHI": "Asia/Karachi", "LHE": "Asia/Karachi", "SKT": "Asia/Karachi",
     "PEW": "Asia/Karachi", "MUX": "Asia/Karachi", "UET": "Asia/Karachi",
