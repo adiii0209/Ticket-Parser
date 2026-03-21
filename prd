@@ -1,0 +1,377 @@
+📄 PRODUCT REQUIREMENTS DOCUMENT (PRD)
+Project: Ticket Parser Service
+
+Version: v1.0
+Owner: Backend Automation System
+
+1️⃣ Overview
+1.1 Purpose
+
+The Ticket Parser Service is a backend microservice responsible for:
+
+Listening to a Gmail inbox
+
+Detecting flight ticket emails
+
+Extracting email body and/or PDF attachment
+
+Parsing structured airline ticket data
+
+Forwarding structured data to the Query Parser System
+
+Marking the email as read only after successful processing
+
+This service does NOT generate the final agency ticket.
+That responsibility belongs to the Query Parser System.
+
+2️⃣ High-Level Architecture
+Gmail Inbox
+    ↓
+Polling Listener (every 30 sec)
+    ↓
+Unread Email Fetch
+    ↓
+Ticket Detection
+    ↓
+Extract Content (PDF > Body)
+    ↓
+LLM Ticket Parser
+    ↓
+Backend Calculations
+    ↓
+Forward to Query Parser System
+    ↓
+Mark Email as Read
+3️⃣ Technology Stack
+
+Python 3.12
+
+Gmail API (OAuth refresh token flow)
+
+google-api-python-client
+
+requests
+
+python-dotenv
+
+LLM via OpenRouter
+
+FastAPI (future)
+
+In-memory PDF extraction (no disk writes)
+
+4️⃣ Gmail Integration
+4.1 Authentication
+
+Uses OAuth 2.0 refresh token flow.
+
+Stored in .env:
+
+GMAIL_CLIENT_ID
+GMAIL_CLIENT_SECRET
+GMAIL_REFRESH_TOKEN
+GMAIL_USER
+
+No InstalledAppFlow in production.
+No token.json used.
+
+4.2 Polling Strategy
+
+Runs every 30 seconds
+
+Fetches:
+
+q="is:unread"
+maxResults=20
+
+Processes only unread emails
+
+Marks email as read ONLY after successful parsing and forwarding
+
+5️⃣ Email Processing Logic
+5.1 Ticket Detection
+
+Email considered ticket-related if:
+
+Contains flight-related keywords:
+
+ticket
+
+itinerary
+
+flight
+
+booking
+
+pnr
+
+reservation
+
+OR contains PDF attachment
+
+Future improvements:
+
+Airline sender domain filtering
+
+PNR pattern detection
+
+5.2 Content Extraction Priority
+
+Priority:
+
+PDF attachment text > email body (text/plain > text/html)
+
+If PDF exists:
+
+Extract text in memory
+
+Do NOT save to disk
+
+If no PDF:
+
+Extract plain text
+
+Fallback to HTML text stripping
+
+6️⃣ Ticket Parser Requirements
+
+The LLM parser must extract:
+
+6.1 Booking Details
+
+Booking Date
+
+Phone Number (Passenger)
+
+Booking Reference (PNR)
+
+Class of Travel
+
+Currency
+
+Grand Total
+
+6.2 Passenger Details (Multi Passenger Support)
+
+For each passenger:
+
+Name
+
+Pax Type (ADT / CHD / INF)
+
+Ticket Number
+
+Frequent Flyer Number
+
+Baggage
+
+Meal
+
+Ancillaries
+
+Fare breakdown:
+
+Base Fare
+
+K3 (Airline GST)
+
+Other Taxes
+
+Total (Extracted)
+
+Total (Calculated)
+
+Seats:
+
+Stored per segment
+
+Each seat linked to segment index
+
+6.3 Flight Segments (Multi Segment Support)
+
+Each segment contains:
+
+Flight Number
+
+Booking Class
+
+Departure:
+
+City
+
+Airport Code
+
+Date
+
+Time
+
+Terminal
+
+Arrival:
+
+City
+
+Airport Code
+
+Date
+
+Time
+
+Terminal
+
+Duration (Extracted)
+
+Duration (Calculated)
+
+7️⃣ Calculations
+
+Both Parser and Query System perform calculations.
+
+Parser calculates:
+
+Duration (if missing)
+
+Fare totals
+
+Grand total
+
+Query System recalculates everything for verification.
+
+Parser must:
+
+Never override extracted values
+
+Only compute derived fields
+
+Flag mismatches
+
+8️⃣ Output JSON Schema
+
+High-level structure:
+
+{
+  "metadata": {
+    "parser_version": "",
+    "received_at": "",
+    "warnings": [],
+    "errors": []
+  },
+  "booking": {},
+  "passengers": [],
+  "segments": []
+}
+
+Supports:
+
+Multi passenger
+
+Multi segment
+
+Layovers
+
+Round trip
+
+Multicity
+
+9️⃣ Error Handling Rules
+
+If parsing fails:
+
+Do NOT mark email as read
+
+Log error
+
+Retry on next cycle
+
+If forwarding fails:
+
+Do NOT mark as read
+
+If successful:
+
+Mark email as read
+
+Unread = Unprocessed
+Read = Successfully Processed
+
+🔟 Non-Responsibilities
+
+Ticket Parser Service will NOT:
+
+Match itinerary
+
+Generate final agency ticket
+
+Perform business decisions
+
+Distribute fares across passengers
+
+Store long-term database state (handled downstream)
+
+1️⃣1️⃣ Performance Requirements
+
+Poll every 30 seconds
+
+Low CPU usage
+
+No file system writes for PDFs
+
+Stateless processing
+
+Idempotent email handling
+
+1️⃣2️⃣ Future Enhancements
+
+Gmail Push Notifications (Pub/Sub)
+
+Airline sender whitelisting
+
+PNR regex detection
+
+Redis queue
+
+FastAPI background workers
+
+Rate limiting
+
+Logging and monitoring
+
+Dead-letter queue
+
+1️⃣3️⃣ Security Requirements
+
+All secrets in .env
+
+.env excluded via .gitignore
+
+No refresh tokens committed
+
+Rotate exposed keys immediately
+
+Validate external API responses
+
+1️⃣4️⃣ Current Status
+
+✅ Gmail OAuth refresh flow implemented
+✅ Modular structure implemented
+✅ Polling mechanism implemented
+✅ Flight keyword filtering implemented
+🔄 PDF extraction next
+🔄 LLM integration next
+🔄 Forwarding to Query System next
+
+📌 Final System Goal
+
+Build a robust, scalable, secure backend microservice that:
+
+Automatically detects incoming flight tickets
+
+Extracts structured data reliably
+
+Validates calculations
+
+Integrates seamlessly with Query Parser System
+
+Allows manual edits downstream
+
+Maintains fault tolerance
