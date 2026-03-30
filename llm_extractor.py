@@ -32,7 +32,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_URL     = os.getenv("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
 MODEL              = os.getenv("MODEL", "openai/gpt-4o-mini")
 TEMPERATURE        = 0
-MAX_TOKENS         = 3000
+MAX_TOKENS         = 8100
 
 if not OPENROUTER_API_KEY:
     raise ValueError("OPENROUTER_API_KEY not set in .env")
@@ -807,26 +807,114 @@ def llm_extract(raw_text: str, regex_hints: dict) -> dict:
         + json.dumps({k: v for k, v in regex_hints.items() if v not in (None, [], {}, "N/A")}, indent=2)
         + "\n=== END HINTS ===\n\n=== TICKET TEXT ===\n" + raw_text
     )
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user",   "content": hint_block},
+    ]
+    content = _call_llm(messages)
+    return _parse_llm_json(content)
+
+
+def _call_llm(messages: list[dict]) -> str:
     headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": MODEL,
-        "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user",   "content": hint_block},
-        ],
+        "messages": messages,
         "temperature": TEMPERATURE,
         "max_tokens": MAX_TOKENS,
     }
     response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=90)
     if response.status_code != 200:
         raise RuntimeError(f"LLM API error {response.status_code}: {response.text[:300]}")
-    content = response.json()["choices"][0]["message"]["content"]
-    content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.IGNORECASE).strip()
-    content = re.sub(r"\s*```$", "", content).strip()
-    start, end = content.find("{"), content.rfind("}")
-    if start == -1 or end == -1:
+
+    try:
+        return response.json()["choices"][0]["message"]["content"]
+    except Exception as exc:
+        raise RuntimeError(f"Malformed LLM API response: {exc}; body={response.text[:500]}") from exc
+
+
+def _extract_json_candidate(content: str) -> str:
+    cleaned = re.sub(r"^```(?:json)?\s*", "", content, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start == -1 or end == -1 or end < start:
         raise ValueError("No JSON found in LLM response")
-    return json.loads(content[start:end + 1])
+    return cleaned[start:end + 1]
+
+
+def _lightweight_json_repair(candidate: str) -> str:
+    repaired = candidate.replace("\ufeff", "")
+    repaired = re.sub(r",(\s*[}\]])", r"\1", repaired)
+    return repaired
+
+
+def _request_json_repair(candidate: str, err: json.JSONDecodeError) -> str:
+    repair_prompt = (
+        "The following text is intended to be JSON for a flight-ticket schema, but it is invalid.\n"
+        "Repair it into valid JSON only.\n"
+        "Rules:\n"
+        "- Output only valid JSON.\n"
+        "- Do not add markdown fences.\n"
+        "- Preserve existing values where possible.\n"
+        "- If a field is incomplete or broken, use \"N/A\" for strings, null for numbers, [] for arrays.\n"
+        f"- Original parse error: {err.msg} at line {err.lineno} column {err.colno}.\n\n"
+        "INVALID JSON:\n"
+        f"{candidate}"
+    )
+    repair_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You repair malformed JSON. "
+                "Return only valid JSON with no markdown or explanation."
+            ),
+        },
+        {"role": "user", "content": repair_prompt},
+    ]
+    return _call_llm(repair_messages)
+
+
+def _parse_llm_json(content: str) -> dict:
+    candidate = _extract_json_candidate(content)
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as first_err:
+        repaired_candidate = _lightweight_json_repair(candidate)
+        if repaired_candidate != candidate:
+            try:
+                parsed = json.loads(repaired_candidate)
+                log.warning(
+                    "LLM returned invalid JSON; local repair succeeded after %s at line %s col %s",
+                    first_err.msg,
+                    first_err.lineno,
+                    first_err.colno,
+                )
+                return parsed
+            except json.JSONDecodeError:
+                pass
+
+        log.warning(
+            "LLM returned invalid JSON; requesting repair after %s at line %s col %s",
+            first_err.msg,
+            first_err.lineno,
+            first_err.colno,
+        )
+        repaired_content = _request_json_repair(candidate, first_err)
+        repaired_json = _extract_json_candidate(repaired_content)
+        try:
+            parsed = json.loads(repaired_json)
+            log.warning(
+                "LLM invalid JSON was repaired successfully after %s at line %s col %s",
+                first_err.msg,
+                first_err.lineno,
+                first_err.colno,
+            )
+            return parsed
+        except json.JSONDecodeError as second_err:
+            raise ValueError(
+                "LLM JSON repair failed: "
+                f"{second_err.msg} at line {second_err.lineno} column {second_err.colno}"
+            ) from second_err
 
 
 # ══════════════════════════════════════════════════════════════════════════════

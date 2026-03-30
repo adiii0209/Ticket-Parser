@@ -7,6 +7,7 @@ from app.forwarder.query_client import notify_processing_batch, send_to_query_sy
 from app.gmail.auth import get_gmail_service
 from app.parser.attachment_extractor import extract_pdf_attachment
 from llm_extractor import extract as parse_ticket_llm
+from gds_parser import try_gds_parse
 
 PNR_REGEX = r"\b[A-Z0-9]{6}\b"
 
@@ -128,12 +129,29 @@ def process_single_email(email):
         return False
 
     try:
-        parsed_ticket = parse_ticket_llm(raw_text)
+        # NOTE: Dedicated IndiGo regex parsing is intentionally disabled for now.
+        # If you want to re-enable it later, restore:
+        #   from indigo_parser import try_indigo_parse
+        # and run this check before GDS/LLM fallback:
+        #   parsed_ticket = try_indigo_parse(raw_text)
+        #   if parsed_ticket is not None:
+        #       print("[PROCESSOR] Ticket parsed successfully via IndiGo parser (no LLM)", flush=True)
+        #   else:
+        #       ...
+        parsed_ticket = try_gds_parse(raw_text)
 
-        if isinstance(parsed_ticket, dict) and not parsed_ticket.get("pnr"):
-            parsed_ticket["pnr"] = pnr
+        if parsed_ticket is not None:
+            print("[PROCESSOR] Ticket parsed successfully via GDS parser (no LLM)", flush=True)
+        else:
+            # Fall back to LLM, including IndiGo emails while the dedicated parser is disabled.
+            parsed_ticket = parse_ticket_llm(raw_text)
+            print("[PROCESSOR] Ticket parsed successfully via LLM (or fallback)", flush=True)
 
-        print("[PROCESSOR] Ticket parsed successfully via LLM (or fallback)", flush=True)
+        bk = parsed_ticket.get("booking", {})
+        if isinstance(parsed_ticket, dict) and not bk.get("pnr"):
+            if "booking" not in parsed_ticket:
+                parsed_ticket["booking"] = {}
+            parsed_ticket["booking"]["pnr"] = pnr
 
     except Exception as e:
         print(f"[PROCESSOR] Global parsing failed: {e}", flush=True)
