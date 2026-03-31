@@ -103,7 +103,7 @@ def _airline_name(code: str) -> str:
 
 _CITY_IATA: Dict[str, str] = {
     # India
-    "KOLKATA":"CCU","CALCUTTA":"CCU","MUMBAI":"BOM","BOMBAY":"BOM",
+    "KOLKATA":"CCU","CALCUTTA":"CCU","KOLKATA SUBHAS CHANDRA BOSE":"CCU","MUMBAI":"BOM","BOMBAY":"BOM",
     "DELHI":"DEL","NEW DELHI":"DEL","CHENNAI":"MAA","MADRAS":"MAA",
     "BENGALURU":"BLR","BANGALORE":"BLR","HYDERABAD":"HYD","KOCHI":"COK",
     "COCHIN":"COK","AHMEDABAD":"AMD","GOA":"GOI","JAIPUR":"JAI",
@@ -113,7 +113,7 @@ _CITY_IATA: Dict[str, str] = {
     "INDORE":"IDR","BHOPAL":"BHO","COIMBATORE":"CJB","MANGALORE":"IXE",
     "THIRUVANANTHAPURAM":"TRV","TRIVANDRUM":"TRV","SRINAGAR":"SXR",
     # Middle East
-    "DOHA":"DOH","DUBAI":"DXB","ABU DHABI":"AUH","SHARJAH":"SHJ",
+    "DOHA":"DOH","DUBAI":"DXB","ABU DHABI":"AUH","ABU DHABI ZAYED":"AUH","SHARJAH":"SHJ",
     "MUSCAT":"MCT","BAHRAIN":"BAH","KUWAIT":"KWI","RIYADH":"RUH",
     "JEDDAH":"JED","DAMMAM":"DMM",
     # Europe
@@ -146,7 +146,7 @@ _CITY_IATA: Dict[str, str] = {
     "GUANGZHOU":"CAN","CHENGDU":"CTU","KUNMING":"KMG",
     # Americas
     "NEW YORK JFK":"JFK","NEW YORK NEWARK":"EWR","NEW YORK":"JFK",
-    "LOS ANGELES":"LAX","CHICAGO":"ORD","SAN FRANCISCO":"SFO",
+    "LOS ANGELES":"LAX","CHICAGO":"ORD","CHICAGO O HARE":"ORD","SAN FRANCISCO":"SFO",
     "TORONTO":"YYZ","VANCOUVER":"YVR","MONTREAL":"YUL",
     "SAO PAULO":"GRU","RIO DE JANEIRO":"GIG","BUENOS AIRES":"EZE",
     "BOGOTA":"BOG","LIMA":"LIM","SANTIAGO":"SCL","MEXICO CITY":"MEX",
@@ -221,8 +221,8 @@ _MONTHS = r'(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)'
 #  CASABLANCA      TK 618  C  27MAR  1645     CBRT                      2PC  OK
 _RE_DEP = re.compile(
     r'^[ \t]{1,3}'
-    r'([A-Z][A-Z \-]{2,35}?)'          # dep city
-    r'[ \t]{2,}'                         # gap
+    r'([A-Z][A-Z \'\-]{2,45}?)'         # dep city
+    r'[ \t]+'                            # gap (some PIRs use a single space here)
     r'([A-Z0-9]{2})\s+'                 # airline code
     r'(\d{1,4}[A-Z]?)\s+'              # flight number
     r'([A-Z])\s+'                       # booking class
@@ -239,7 +239,7 @@ _RE_DEP = re.compile(
 #  ISTANBUL           SEAT: 03B     ARRIVAL TIME: 2325   ARRIVAL DATE: 27MAR
 _RE_ARR = re.compile(
     r'^[ \t]{1,3}'
-    r'([A-Z][A-Z \-]{2,45}?)'
+    r'([A-Z][A-Z \'\-]{2,45}?)'
     r'(?:[ \t]{3,}(?:SEAT:\s*(\w+)\s+)?)?'
     r'ARRIVAL\s+TIME:\s*(\d{4})'
     r'.*?ARRIVAL\s+DATE:\s*(\d{1,2}(?:' + _MONTHS + r'))',
@@ -254,6 +254,17 @@ _RE_TERMINAL = re.compile(r'TERMINAL\s*[:\s]+([A-Z0-9]{1,3})', re.I)
 
 # Date parser for DDMON format
 _RE_ADATE = re.compile(r'(\d{1,2})(' + _MONTHS + r')(\d{0,4})', re.I)
+_RE_CITY_CONTINUATION = re.compile(r'^[A-Z][A-Z \'\-/0-9]+$', re.I)
+_RE_CITY_CONTINUATION_SKIP = re.compile(
+    r'^(?:'
+    r'FLIGHT OPERATED BY|MARKETED BY|AT CHECK|BAGGAGE POLICY|CARRY-ON BAG|'
+    r'FROM /TO|ISSUING AIRLINE|TICKET NUMBER|BOOKING REF|DATE|AGENT|NAME|IATA|'
+    r'TELEPHONE|PAYMENT|ENDORSEMENTS?|FARE CALCULATION|AIR FARE|TAX|TOTAL|'
+    r'AIRLINE SURCHARGES|NOTICE|SOURCE|THIS DOCUMENT|PLEASE DO NOT|'
+    r'FLIGHT\(S\) EMISSIONS|GST[A-Z]'
+    r')\b',
+    re.I,
+)
 
 
 def _parse_adate(raw: str, default_yr: str = "26") -> str:
@@ -271,6 +282,20 @@ def _infer_year(text: str) -> str:
     if m:
         return m.group(1)[2:]
     return "26"
+
+
+def _is_city_continuation(line: str) -> bool:
+    """Return True for uppercase city/airport continuation lines inside PIR blocks."""
+    nln = line.strip()
+    if not nln or len(nln) > 40:
+        return False
+    if ":" in nln:
+        return False
+    if not _RE_CITY_CONTINUATION.match(nln):
+        return False
+    if _RE_CITY_CONTINUATION_SKIP.match(nln):
+        return False
+    return True
 
 
 def _parse_pir_segments(text: str) -> Tuple[List[Dict], List[str]]:
@@ -352,17 +377,13 @@ def _parse_pir_segments(text: str) -> Tuple[List[Dict], List[str]]:
                     seat_num = sm.group(1)
 
             # City continuation line (e.g. "MOHAMMED V" or "NGURAH RAI")
-            if (nln and re.match(r'^[A-Z][A-Z \-:0-9]+$', nln)
-                    and len(nln) < 40
+            if (_is_city_continuation(lines[j])
                     and not _RE_DEP.match(lines[j])
-                    and 'ARRIVAL' not in nln
-                    and 'ENDORSEMENT' not in nln
-                    and 'CHECK-IN' not in nln
-                    and 'AT CHECK' not in nln
-                    and 'FARE' not in nln.split()[0] if nln.split() else True):
-                if not found_arr:
-                    dep_city_raw += " " + nln
-                # Don't append to arr — noise for city resolution
+                    and not _RE_ARR.match(lines[j])):
+                if found_arr:
+                    arr_city_raw = f"{arr_city_raw} {nln}".strip()
+                else:
+                    dep_city_raw = f"{dep_city_raw} {nln}".strip()
                 j += 1
                 continue
 
@@ -458,6 +479,7 @@ _RE_PAX_HEADER = re.compile(
 
 _RE_PHONE = re.compile(r'TELEPHONE\s*[:\s]+(\(?\d{2,4}\)?[\d\s\-]{6,20}\d)', re.I)
 _RE_PHONE2 = re.compile(r'(?:CTCM|CTCH|P-|PHONE|CONTACT)\s*[:\s]*([+\d][\d\s\-]{7,20}\d)', re.I)
+_RE_GSTN = re.compile(r'^\s*GSTN\b.*?/([0-9A-Z]{15})/([^\n]+)$', re.MULTILINE | re.I)
 
 _RE_AGENCY = re.compile(
     r'^[ \t]+([A-Z][A-Z\s&.,]+?(?:LTD|PVT|INC|CORP|CO\.?|TRAVELS?|TOURS?))[ \t]+DATE',
@@ -562,6 +584,11 @@ def _extract_gds(text: str) -> Dict:
     # ── Agency ──
     m = _RE_AGENCY.search(text)
     agency = m.group(1).strip().title() if m else "N/A"
+
+    # ── GST ──
+    m = _RE_GSTN.search(text)
+    gst_number = m.group(1).strip().upper() if m else "N/A"
+    gst_company = re.sub(r'\s+', ' ', m.group(2).strip()) if m else "N/A"
 
     # ── Fares ──
     fare_currency = None
@@ -689,7 +716,7 @@ def _extract_gds(text: str) -> Dict:
             "grand_total": grand_t,
             "class_of_travel": class_of_travel,
         },
-        "gst_details": {"gst_number": "N/A", "company_name": "N/A"},
+        "gst_details": {"gst_number": gst_number, "company_name": gst_company},
         "passengers": passengers,
         "segments": segments,
         "barcode": None,
