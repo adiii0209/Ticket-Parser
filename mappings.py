@@ -114,6 +114,7 @@ AIRPORT_CODES = {
     "PEN": "Penang", "JHB": "Johor Bahru", "KCH": "Kuching", "BKI": "Kota Kinabalu",
     "LGK": "Langkawi", "KUL": "Kuala Lumpur", "SZB": "Kuala Lumpur Subang",
     "CEB": "Cebu", "DVO": "Davao", "ILO": "Iloilo", "CRK": "Clark", "KLO": "Boracay Kalibo",
+    "TAC": "Tacloban Daniel Z Romualdez",
     "MPH": "Caticlan", "BCD": "Bacolod", "CBO": "Cotabato", "GES": "General Santos",
     "DAD": "Da Nang", "CXR": "Nha Trang Cam Ranh", "DLI": "Dalat", "VII": "Vinh",
     "HUI": "Hue", "PQC": "Phu Quoc", "VCA": "Can Tho", "BMV": "Buon Ma Thuot",

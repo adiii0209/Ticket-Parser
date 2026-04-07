@@ -139,6 +139,8 @@ _CITY_IATA: Dict[str, str] = {
     "COLOMBO":"CMB","KATHMANDU":"KTM","DHAKA":"DAC",
     "DENPASAR":"DPS","DENPASAR-BALI":"DPS","BALI":"DPS",
     "DENPASAR BALI":"DPS","NGURAH RAI":"DPS",
+    "TACLOBAN":"TAC","TACLOBAN D Z":"TAC",
+    "TACLOBAN DANIEL Z":"TAC","TACLOBAN DANIEL Z ROMUALDEZ":"TAC",
     "JAKARTA":"CGK","SURABAYA":"SUB","YOGYAKARTA":"JOG",
     "MANILA":"MNL","CEBU":"CEB","HANOI":"HAN",
     "HO CHI MINH":"SGN","SAIGON":"SGN",
@@ -183,6 +185,36 @@ def _resolve_city_name(raw_city: str) -> str:
     return "N/A"
 
 
+def _normalize_city_for_match(raw_city: str) -> str:
+    city = re.sub(r'\s+', ' ', raw_city.strip()).upper()
+    city = re.sub(
+        r'\b(?:INTERNATIONAL|AIRPORT|TERMINAL|INTL|SUBHAS|CHANDRA|BOSE|HAMAD|'
+        r'INDIRA|GANDHI|RAJIV|NETAJI|CHHATRAPATI|SHIVAJI|MAHARAJ|'
+        r'KEMPEGOWDA|KING|QUEEN|ALIA|KHALID|FAHD|PRINCE|MOHAMED|'
+        r'BEN|GURION|ATATURK|SABIHA|GOKCEN|NINOY|AQUINO|DANIEL|ROMUALDEZ|D|Z)\b',
+        '',
+        city,
+    )
+    return re.sub(r'\s+', ' ', city).strip()
+
+
+def _iata_matches_city(raw_city: str, iata: str) -> bool:
+    """Return True when the candidate IATA is consistent with the parsed city text."""
+    if not raw_city or not iata or iata == "N/A":
+        return False
+
+    resolved = _resolve_city_name(raw_city)
+    if resolved != "N/A":
+        return resolved == iata
+
+    city_norm = _normalize_city_for_match(raw_city)
+    airport_name = _normalize_city_for_match(AIRPORT_CODES.get(iata.upper(), ""))
+    if not city_norm or not airport_name:
+        return False
+
+    return city_norm in airport_name or airport_name in city_norm
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Schema templates
 # ─────────────────────────────────────────────────────────────────────────────
@@ -209,6 +241,61 @@ def _pax(name="N/A", pax_type="ADT", ticket_number="N/A",
         "fare": {"base_fare": None, "k3_gst": None, "other_taxes": None, "total_fare": None},
         "seats": [],
     }
+
+
+def _dedupe_segments_with_remap(segments: List[Dict]) -> Tuple[List[Dict], Dict[int, int]]:
+    """Return unique segments plus old_index -> new_index remap."""
+    unique_segments: List[Dict] = []
+    seen_segs: Dict[Tuple[str, str, str, str], int] = {}
+    index_remap: Dict[int, int] = {}
+
+    for old_idx, seg in enumerate(segments):
+        key = (
+            seg.get("flight_number"),
+            seg.get("departure", {}).get("date"),
+            seg.get("departure", {}).get("airport"),
+            seg.get("arrival", {}).get("airport"),
+        )
+        new_idx = seen_segs.get(key)
+        if new_idx is None:
+            new_idx = len(unique_segments)
+            seen_segs[key] = new_idx
+            unique_segments.append(seg)
+        index_remap[old_idx] = new_idx
+
+    return unique_segments, index_remap
+
+
+def _remap_segment_refs(passengers: List[Dict], index_remap: Dict[int, int]) -> None:
+    """Collapse duplicate segment references after segment deduplication."""
+    for pax in passengers:
+        for field, identity_keys in (
+            ("seats", ("seat_number",)),
+            ("meals", ("code", "name")),
+            ("ancillaries", ("code", "name")),
+        ):
+            items = pax.get(field, [])
+            remapped_items = []
+            seen_items = set()
+
+            for item in items:
+                old_idx = item.get("segment_index")
+                if old_idx not in index_remap:
+                    continue
+
+                new_item = dict(item)
+                new_item["segment_index"] = index_remap[old_idx]
+
+                dedupe_key = (new_item["segment_index"],) + tuple(
+                    new_item.get(key) for key in identity_keys
+                )
+                if dedupe_key in seen_items:
+                    continue
+
+                seen_items.add(dedupe_key)
+                remapped_items.append(new_item)
+
+            pax[field] = remapped_items
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -308,6 +395,7 @@ def _parse_pir_segments(text: str) -> Tuple[List[Dict], List[str]]:
     seats: List[Optional[str]] = []
     lines = text.split('\n')
     default_yr = _infer_year(text)
+    header_routes = [(m.group(1).upper(), m.group(2).upper()) for m in _RE_HEADER_ROUTE.finditer(text)]
 
     i = 0
     while i < len(lines):
@@ -397,6 +485,14 @@ def _parse_pir_segments(text: str) -> Tuple[List[Dict], List[str]]:
 
         dep_ap = _resolve_city_name(dep_city_raw)
         arr_ap = _resolve_city_name(arr_city_raw)
+
+        route_hint = header_routes[len(segments)] if len(segments) < len(header_routes) else None
+        if route_hint:
+            hinted_dep, hinted_arr = route_hint
+            if dep_ap == "N/A" and _iata_matches_city(dep_city_raw, hinted_dep):
+                dep_ap = hinted_dep
+            if arr_ap == "N/A" and _iata_matches_city(arr_city_raw, hinted_arr):
+                arr_ap = hinted_arr
 
         segments.append(_seg(
             airline=_airline_name(al_code),
@@ -501,6 +597,11 @@ _RE_YR = re.compile(r'(\d[\d,]*)YR\b')
 _RE_K3 = re.compile(r'(?:INR|USD)\s+(\d[\d,]*)K3\b', re.I)
 
 _RE_IATA_NUM = re.compile(r'IATA\s*[:\s]*([\d\s]+)', re.I)
+_RE_HEADER_ROUTE = re.compile(
+    r'^\s*[A-Z]{2,}/[A-Z][A-Z\s]+?\s+(?:MR|MRS|MS|MISS|DR|MSTR)\s+'
+    r'\d{1,2}(?:' + _MONTHS + r')\s+([A-Z]{3})\s+([A-Z]{3})\s*$',
+    re.MULTILINE | re.I,
+)
 
 # Seat from arrival line
 _RE_SEAT_ARR = re.compile(r'SEAT:\s*(\d{1,3}[A-Z])', re.I)
@@ -763,18 +864,8 @@ def try_gds_parse(raw_text: str) -> Optional[Dict]:
     source_name = extracted.get("source_name", "GDS")
 
     # Deduplicate segments (e.g., if PDF has multiple pages with the same itinerary)
-    unique_segments = []
-    seen_segs = set()
-    for s in extracted["segments"]:
-        key = (
-            s.get("flight_number"),
-            s.get("departure", {}).get("date"),
-            s.get("departure", {}).get("airport"),
-            s.get("arrival", {}).get("airport")
-        )
-        if key not in seen_segs:
-            seen_segs.add(key)
-            unique_segments.append(s)
+    unique_segments, index_remap = _dedupe_segments_with_remap(extracted["segments"])
+    _remap_segment_refs(extracted["passengers"], index_remap)
 
     data = {
         "booking":     extracted["booking"],
