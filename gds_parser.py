@@ -561,8 +561,11 @@ _RE_PNR_GENERIC = re.compile(
 _RE_BK_DATE = re.compile(
     r'DATE\s*[:\s]+(\d{1,2})\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+(\d{4})', re.I)
 
-_RE_TICKET = re.compile(r'ETKT\s+(\d{3})\s+(\d{10})(?:-\d+)?', re.I)
-_RE_TICKET_13 = re.compile(r'TICKET\s+NUMBER\s*[:\s]*ETKT\s+(\d{3})\s+(\d{10})', re.I)
+_RE_TICKET = re.compile(r'ETKT\s+(\d{3})\s+(\d{10})(-\d+)?', re.I)
+_RE_TICKET_13 = re.compile(
+    r'TICKET\s+NUMBER\s*[:\s]*(?:ETKT\s+)?(\d{3})\s*(\d{10})(-\d+)?',
+    re.I,
+)
 
 _RE_PAX_LABEL = re.compile(
     r'NAME\s*[:\s]+([A-Z]+)/([A-Z][A-Z\s]+?)(?:\s+(MR|MRS|MS|MISS|DR|MSTR))?'
@@ -640,10 +643,10 @@ def _extract_gds(text: str) -> Dict:
     # ── Tickets ──
     tickets = []
     for m in _RE_TICKET.finditer(text):
-        tickets.append(m.group(1) + m.group(2))
+        tickets.append(m.group(1) + m.group(2) + (m.group(3) or ""))
     if not tickets:
         for m in _RE_TICKET_13.finditer(text):
-            tickets.append(m.group(1) + m.group(2))
+            tickets.append(m.group(1) + m.group(2) + (m.group(3) or ""))
 
     # ── Passenger names ──
     pax_names = []

@@ -459,7 +459,7 @@ _AIRLINE_CLASS_OVERRIDES = {
     # Air India (AI)
     "AI": {
         "O": ("Economy", "Economy"),
-        "J": ("Business", "Business Class (Maharaja)"),
+        "J": ("Economy", "Economy)"),
     },
     # Vistara / Air India (UK)
     "UK": {
