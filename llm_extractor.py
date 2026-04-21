@@ -28,7 +28,7 @@ try:
 except ImportError:
     raise RuntimeError("mappings.py not found. Place it in the same directory.")
 
-OPENROUTER_API_KEY = "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"
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_URL     = os.getenv("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
 MODEL              = os.getenv("MODEL", "openai/gpt-4o-mini")
 TEMPERATURE        = 0
