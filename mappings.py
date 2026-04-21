@@ -3,8 +3,8 @@
 
 AIRPORT_CODES = {
     # ===== INDIA (Major hubs first) =====
-    "DEL": "Delhi", "BOM": "Mumbai", "BLR": "Bengaluru", "MAA": "Chennai", "CCU": "Kolkata",
-    "HYD": "Hyderabad", "AMD": "Ahmedabad", "PNQ": "Pune", "COK": "Kochi", "GOI": "Goa",
+    "DEL": "Delhi", "BOM": "Mumbai", "NMI": "Navi Mumbai", "BLR": "Bengaluru", "MAA": "Chennai", "CCU": "Kolkata",
+    "HYD": "Hyderabad", "AMD": "Ahmedabad", "PNQ": "Pune", "COK": "Kochi", "GOI": "Goa", "VTZ": "Vishakhapatnam",
     "JAI": "Jaipur", "TRV": "Thiruvananthapuram", "GAU": "Guwahati", "LKO": "Lucknow",
     "NAG": "Nagpur", "IXC": "Chandigarh", "VNS": "Varanasi", "PAT": "Patna", "BBI": "Bhubaneswar",
     "IXB": "Bagdogra", "IXR": "Ranchi", "IDR": "Indore", "RPR": "Raipur", "VGA": "Vijayawada",
@@ -16,6 +16,10 @@ AIRPORT_CODES = {
     "BEP": "Bellary", "HBX": "Hubli", "IXG": "Belgaum", "GOP": "Gorakhpur", "DED": "Dehradun",
     "PGH": "Pantnagar", "TNI": "Satna", "KUU": "Kullu Manali", "SHL": "Shillong", "IXS": "Silchar",
     "AJL": "Aizawl", "IXA": "Agartala", "DMU": "Dimapur", "CBD": "Car Nicobar", "IXV": "Along",
+    "CNN": "Kannur", "TRZ": "Tiruchirappalli", "JDH": "Jodhpur", "JSA": "Jaisalmer", "JGA": "Jamnagar",
+    "BKB": "Bikaner", "GAY": "Gaya", "DBG": "Darbhanga", "JRG": "Jharsuguda", "GBI": "Kalaburagi",
+    "CDP": "Kadapa", "KJB": "Kurnool", "SDW": "Sindhudurg", "KBK": "Kushinagar", "NDC": "Nanded",
+    "DPA": "Durgapur", "TEI": "Tezu", "HDO": "Hindon",
     
     # ===== UNITED STATES (Major hubs first) =====
     "ATL": "Atlanta Hartsfield-Jackson", "LAX": "Los Angeles", "ORD": "Chicago O'Hare", 
@@ -71,11 +75,12 @@ AIRPORT_CODES = {
     "FNC": "Funchal Madeira", "PDL": "Ponta Delgada", "CAG": "Cagliari", "CTA": "Catania",
     "PMO": "Palermo", "BRI": "Bari", "RHO": "Rhodes", "HER": "Heraklion", "CFU": "Corfu",
     "CHQ": "Chania", "JTR": "Santorini", "ZTH": "Zakynthos", "KGS": "Kos",
+    "KEF": "Reykjavik Keflavik", "RKV": "Reykjavik Domestic",
     
     # ===== MIDDLE EAST (Major hubs first) =====
-    "DXB": "Dubai International", "DOH": "Doha Hamad", "AUH": "Abu Dhabi", "JED": "Jeddah",
+    "DXB": "Dubai International", "DWC": "Dubai Al Maktoum", "DOH": "Doha Hamad", "AUH": "Zayed International", "JED": "Jeddah",
     "RUH": "Riyadh King Khalid", "KWI": "Kuwait", "CAI": "Cairo", "TLV": "Tel Aviv Ben Gurion",
-    "MCT": "Muscat", "BAH": "Bahrain", "AMM": "Amman Queen Alia", "BEY": "Beirut",
+    "MCT": "Muscat", "SLL": "Salalah", "SOH": "Sohar", "BAH": "Bahrain", "AMM": "Amman Queen Alia", "BEY": "Beirut",
     "SHJ": "Sharjah", "DMM": "Dammam King Fahd", "MED": "Madinah", "TIF": "Taif",
     "GIZ": "Jizan", "AJF": "Al Jouf", "ELQ": "Gassim", "HAS": "Hail", "TUU": "Tabuk",
     "AHB": "Abha", "URY": "Gurayat", "RAE": "Arar", "BGW": "Baghdad", "BSR": "Basra",
@@ -116,8 +121,10 @@ AIRPORT_CODES = {
     "CEB": "Cebu", "DVO": "Davao", "ILO": "Iloilo", "CRK": "Clark", "KLO": "Boracay Kalibo",
     "TAC": "Tacloban Daniel Z Romualdez",
     "MPH": "Caticlan", "BCD": "Bacolod", "CBO": "Cotabato", "GES": "General Santos",
-    "DAD": "Da Nang", "CXR": "Nha Trang Cam Ranh", "DLI": "Dalat", "VII": "Vinh",
+    "DAD": "Da Nang", "CXR": "Nha Trang Cam Ranh", "DLI": "Dalat", "VII": "Vinh", "VDH": "Dong Hoi",
     "HUI": "Hue", "PQC": "Phu Quoc", "VCA": "Can Tho", "BMV": "Buon Ma Thuot",
+    "UIH": "Qui Nhon", "VCL": "Chu Lai", "THD": "Thanh Hoa", "PXU": "Pleiku", "TBB": "Tuy Hoa",
+    "DIN": "Dien Bien Phu", "VKG": "Rach Gia", "CAH": "Ca Mau", "VCS": "Con Dao",
     "MDL": "Mandalay", "NYU": "Bagan Nyaung U", "HEH": "Heho", "KYP": "Kyaukpyu",
     "REP": "Siem Reap", "KOS": "Sihanoukville", "PNL": "Pantelleria", "LPQ": "Luang Prabang",
     "PKZ": "Pakse", "ZVK": "Savannakhet", "KOP": "Nakhon Phanom",
@@ -236,10 +243,13 @@ AIRLINE_CODES = {
     "SN": "Brussels Airlines", "SK": "SAS Scandinavian Airlines", "AY": "Finnair",
     "TP": "TAP Air Portugal", "LO": "LOT Polish Airlines", "OK": "Czech Airlines",
     "RO": "Tarom", "JU": "Air Serbia", "OU": "Croatia Airlines", "A3": "Aegean Airlines",
-    "FR": "Ryanair", "U2": "easyJet", "W6": "Wizz Air", "VY": "Vueling", "TO": "Transavia",
-    "EW": "Eurowings", "DE": "Condor", "X3": "TUI fly", "BY": "TUI Airways",
-    "W4": "Wizz Air Malta", "W9": "Wizz Air UK", "MT": "Thomas Cook Airlines",
-    "LS": "Jet2.com", "EI": "Aer Lingus", "WX": "CityJet", "BE": "Flybe",
+    "FR": "Ryanair", "U2": "easyJet", "EC": "easyJet Europe", "DS": "easyJet Switzerland",
+    "RK": "Ryanair UK", "RR": "Buzz (Ryanair)", "W6": "Wizz Air", "VY": "Vueling Airlines", 
+    "TO": "Transavia", "HV": "Transavia Holland", "EW": "Eurowings", "DE": "Condor", 
+    "DY": "Norwegian Air", "D8": "Norwegian Air International", "V7": "Volotea",
+    "X3": "TUI fly", "BY": "TUI Airways", "W4": "Wizz Air Malta", "W9": "Wizz Air UK", 
+    "MT": "Thomas Cook Airlines", "LS": "Jet2.com", "EI": "Aer Lingus", "WX": "CityJet", 
+    "BE": "Flybe", "FI": "Icelandair", "OG": "PLAY Airlines",
     
     # ===== MIDDLE EAST =====
     "EK": "Emirates", "QR": "Qatar Airways", "EY": "Etihad Airways", "WY": "Oman Air",
@@ -312,6 +322,7 @@ MEAL_CODES = {
     # ── Standard IATA Meal Codes ────────────────────────────────────────────
     "VGML": "Veg Meal",
     "VCSW": "Veg Sandwich + Beverage",
+    "NUSW": "Non-Veg Sandwich + Beverage",
     "NVML": "Non-Veg Meal",
     "CPML": "Complimentary Meal",
     "AVML": "Asian Vegetarian Meal",
@@ -529,7 +540,7 @@ def resolve_booking_class(letter: str, airline_code: str = None) -> dict:
 # IANA Timezone Mapping for DST Support
 AIRPORT_TZ_MAP = {
     # ===== INDIA (No DST - All UTC+5:30) =====
-    "CCU": "Asia/Kolkata", "DEL": "Asia/Kolkata", "BOM": "Asia/Kolkata", "BLR": "Asia/Kolkata",
+    "CCU": "Asia/Kolkata", "DEL": "Asia/Kolkata", "BOM": "Asia/Kolkata", "NMI": "Asia/Kolkata", "BLR": "Asia/Kolkata",
     "MAA": "Asia/Kolkata", "HYD": "Asia/Kolkata", "AMD": "Asia/Kolkata", "PNQ": "Asia/Kolkata",
     "GOI": "Asia/Kolkata", "COK": "Asia/Kolkata", "TRV": "Asia/Kolkata", "GAU": "Asia/Kolkata",
     "JAI": "Asia/Kolkata", "LKO": "Asia/Kolkata", "PAT": "Asia/Kolkata", "IXR": "Asia/Kolkata",
@@ -546,7 +557,12 @@ AIRPORT_TZ_MAP = {
     "KUU": "Asia/Kolkata", "SHL": "Asia/Kolkata", "IXS": "Asia/Kolkata", "AJL": "Asia/Kolkata",
     "IXA": "Asia/Kolkata", "DMU": "Asia/Kolkata", "CBD": "Asia/Kolkata", "IXV": "Asia/Kolkata",
     "IXW": "Asia/Kolkata", "IXI": "Asia/Kolkata", "TEZ": "Asia/Kolkata", "RGH": "Asia/Kolkata",
-    "COH": "Asia/Kolkata", "VTZ": "Asia/Kolkata",
+    "COH": "Asia/Kolkata", "VTZ": "Asia/Kolkata", "CCJ": "Asia/Kolkata",
+    "CNN": "Asia/Kolkata", "TRZ": "Asia/Kolkata", "JDH": "Asia/Kolkata", "JSA": "Asia/Kolkata",
+    "JGA": "Asia/Kolkata", "BKB": "Asia/Kolkata", "GAY": "Asia/Kolkata", "DBG": "Asia/Kolkata",
+    "JRG": "Asia/Kolkata", "GBI": "Asia/Kolkata", "CDP": "Asia/Kolkata", "KJB": "Asia/Kolkata",
+    "SDW": "Asia/Kolkata", "KBK": "Asia/Kolkata", "NDC": "Asia/Kolkata", "DPA": "Asia/Kolkata",
+    "TEI": "Asia/Kolkata", "HDO": "Asia/Kolkata",
     
     # ===== UNITED STATES (With DST) =====
     "ATL": "America/New_York", "JFK": "America/New_York", "EWR": "America/New_York",
@@ -625,11 +641,12 @@ AIRPORT_TZ_MAP = {
     "ZAG": "Europe/Zagreb", "LJU": "Europe/Ljubljana", "SPU": "Europe/Belgrade", "DBV": "Europe/Belgrade",
     "VNO": "Europe/Vilnius", "RIX": "Europe/Riga", "TLL": "Europe/Tallinn",
     "LED": "Europe/Moscow", "SVO": "Europe/Moscow", "DME": "Europe/Moscow",
+    "KEF": "Atlantic/Reykjavik", "RKV": "Atlantic/Reykjavik",
     "LYX": "Asia/Nicosia", "PFO": "Asia/Nicosia",
     
     # ===== MIDDLE EAST =====
-    "DXB": "Asia/Dubai", "AUH": "Asia/Dubai", "SHJ": "Asia/Dubai", "DOH": "Asia/Qatar",
-    "MCT": "Asia/Muscat", "BAH": "Asia/Bahrain", "KWI": "Asia/Kuwait",
+    "DXB": "Asia/Dubai", "AUH": "Asia/Dubai", "DWC": "Asia/Dubai", "SHJ": "Asia/Dubai", "DOH": "Asia/Qatar",
+    "MCT": "Asia/Muscat", "SLL": "Asia/Muscat", "SOH": "Asia/Muscat", "BAH": "Asia/Bahrain", "KWI": "Asia/Kuwait",
     "RUH": "Asia/Riyadh", "JED": "Asia/Riyadh", "DMM": "Asia/Riyadh", "MED": "Asia/Riyadh",
     "TIF": "Asia/Riyadh", "GIZ": "Asia/Riyadh", "AJF": "Asia/Riyadh", "ELQ": "Asia/Riyadh",
     "HAS": "Asia/Riyadh", "TUU": "Asia/Riyadh", "AHB": "Asia/Riyadh", "URY": "Asia/Riyadh",
@@ -666,9 +683,12 @@ AIRPORT_TZ_MAP = {
     "MNL": "Asia/Manila", "CEB": "Asia/Manila", "DVO": "Asia/Manila", "ILO": "Asia/Manila",
     "CRK": "Asia/Manila", "KLO": "Asia/Manila", "MPH": "Asia/Manila", "BCD": "Asia/Manila",
     "CBO": "Asia/Manila", "GES": "Asia/Manila", "HAN": "Asia/Ho_Chi_Minh", "SGN": "Asia/Ho_Chi_Minh",
-    "DAD": "Asia/Ho_Chi_Minh", "CXR": "Asia/Ho_Chi_Minh", "DLI": "Asia/Ho_Chi_Minh",
+    "DAD": "Asia/Ho_Chi_Minh", "CXR": "Asia/Ho_Chi_Minh", "DLI": "Asia/Ho_Chi_Minh", "VDH": "Asia/Ho_Chi_Minh",
     "VII": "Asia/Ho_Chi_Minh", "HUI": "Asia/Ho_Chi_Minh", "PQC": "Asia/Ho_Chi_Minh",
-    "VCA": "Asia/Ho_Chi_Minh", "BMV": "Asia/Ho_Chi_Minh", "RGN": "Asia/Yangon",
+    "VCA": "Asia/Ho_Chi_Minh", "BMV": "Asia/Ho_Chi_Minh", "UIH": "Asia/Ho_Chi_Minh",
+    "VCL": "Asia/Ho_Chi_Minh", "THD": "Asia/Ho_Chi_Minh", "PXU": "Asia/Ho_Chi_Minh",
+    "TBB": "Asia/Ho_Chi_Minh", "DIN": "Asia/Ho_Chi_Minh", "VKG": "Asia/Ho_Chi_Minh",
+    "CAH": "Asia/Ho_Chi_Minh", "VCS": "Asia/Ho_Chi_Minh", "RGN": "Asia/Yangon",
     "MDL": "Asia/Yangon", "NYU": "Asia/Yangon", "HEH": "Asia/Yangon",
     "PNH": "Asia/Phnom_Penh", "REP": "Asia/Phnom_Penh", "KOS": "Asia/Phnom_Penh",
     "VTE": "Asia/Vientiane", "LPQ": "Asia/Vientiane", "PKZ": "Asia/Vientiane",

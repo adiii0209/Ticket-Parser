@@ -6,11 +6,9 @@ import fitz  # PyMuPDF
 from app.forwarder.query_client import notify_processing_batch, send_to_query_system
 from app.gmail.auth import get_gmail_service
 from app.parser.attachment_extractor import extract_pdf_attachment
-from llm_extractor import extract as parse_ticket_llm
+from indigo_parser import try_indigo_parse
+from llm_extractor import extract as parse_ticket_llm, _extract_pnr
 from gds_parser import try_gds_parse
-
-PNR_REGEX = r"\b[A-Z0-9]{6}\b"
-
 
 def extract_text_from_pdf(pdf_bytes):
     try:
@@ -28,8 +26,7 @@ def extract_text_from_pdf(pdf_bytes):
 def extract_pnr(text):
     if not text:
         return None
-    matches = re.findall(PNR_REGEX, text.upper())
-    return matches[0] if matches else None
+    return _extract_pnr(text)
 
 
 def _build_batch_id(email):
@@ -129,21 +126,14 @@ def process_single_email(email):
         return False
 
     try:
-        # NOTE: Dedicated IndiGo regex parsing is intentionally disabled for now.
-        # If you want to re-enable it later, restore:
-        #   from indigo_parser import try_indigo_parse
-        # and run this check before GDS/LLM fallback:
-        #   parsed_ticket = try_indigo_parse(raw_text)
-        #   if parsed_ticket is not None:
-        #       print("[PROCESSOR] Ticket parsed successfully via IndiGo parser (no LLM)", flush=True)
-        #   else:
-        #       ...
-        parsed_ticket = try_gds_parse(raw_text)
-
+        parsed_ticket = try_indigo_parse(raw_text)
         if parsed_ticket is not None:
-            print("[PROCESSOR] Ticket parsed successfully via GDS parser (no LLM)", flush=True)
+            print("[PROCESSOR] Ticket parsed successfully via IndiGo parser (no LLM)", flush=True)
         else:
-            # Fall back to LLM, including IndiGo emails while the dedicated parser is disabled.
+            parsed_ticket = try_gds_parse(raw_text)
+            if parsed_ticket is not None:
+                print("[PROCESSOR] Ticket parsed successfully via GDS parser (no LLM)", flush=True)
+        if parsed_ticket is None:
             parsed_ticket = parse_ticket_llm(raw_text)
             print("[PROCESSOR] Ticket parsed successfully via LLM (or fallback)", flush=True)
 

@@ -555,6 +555,11 @@ def _parse_cryptic_segments(text: str) -> List[Dict]:
 
 _RE_PNR_AMADEUS = re.compile(r'AMADEUS\s*:\s*([A-Z0-9]{6})\b', re.I)
 _RE_PNR_AIRLINE = re.compile(r'AIRLINE\s*:\s*[A-Z]{2}/([A-Z0-9]{6})\b', re.I)
+_RE_PNR_AIRLINE_LABEL = re.compile(
+    r'\bAIRLINE\s+(?:BOOKING\s+)?(?:REF(?:ERENCE)?|PNR)\s*[:#\-\s]*'
+    r'(?:[A-Z]{2}/)?([A-Z0-9]{5,8})\b',
+    re.I,
+)
 _RE_PNR_GENERIC = re.compile(
     r'(?:BOOKING\s*REF(?:ERENCE)?|RECORD\s*LOCATOR|PNR|RECLOC)\s*[:\s/\-]*([A-Z0-9]{6})\b', re.I)
 
@@ -620,17 +625,21 @@ def _extract_gds(text: str) -> Dict:
     """Full GDS extraction pipeline."""
 
     # ── PNR ──
-    m = _RE_PNR_AMADEUS.search(text)
-    pnr = m.group(1).upper() if m else None
-    if not pnr:
-        m = _RE_PNR_GENERIC.search(text)
-        pnr = m.group(1).upper() if m else "N/A"
-
-    # ── Airline PNR ──
     airline_pnr = None
-    m = _RE_PNR_AIRLINE.search(text)
-    if m:
-        airline_pnr = m.group(1).upper()
+    for pattern in (_RE_PNR_AIRLINE, _RE_PNR_AIRLINE_LABEL):
+        m = pattern.search(text)
+        if m:
+            airline_pnr = m.group(1).upper()
+            break
+
+    m = _RE_PNR_AMADEUS.search(text)
+    gds_pnr = m.group(1).upper() if m else None
+    if not gds_pnr:
+        m = _RE_PNR_GENERIC.search(text)
+        gds_pnr = m.group(1).upper() if m else None
+
+    # ── Preferred booking PNR: airline locator wins over GDS/Amadeus ──
+    pnr = airline_pnr or gds_pnr or "N/A"
 
     # ── Booking date ──
     m = _RE_BK_DATE.search(text)

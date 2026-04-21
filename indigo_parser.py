@@ -33,7 +33,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from mappings import AIRLINE_CODES, AIRPORT_CODES, ANCILLARY_CODES, MEAL_CODES, search_by_name
-from llm_extractor import build_journey, normalize_data, normalize_name
+from llm_extractor import build_journey, normalize_data, normalize_name, _extract_pnr
 
 INDIGO_PARSER_VERSION = "indigo_regex_v3.0"
 
@@ -67,7 +67,8 @@ _INDIGO_MARKERS = [
 # Booking / meta regexes
 # ---------------------------------------------------------------------------
 _RE_PNR = re.compile(
-    r"(?:PNR|Booking\s*Ref(?:erence)?)\s*[:/]\s*([A-Z0-9]{5,8})", re.I
+    r"PNR\s*/\s*Booking\s*Ref\.?\s*:\s*([A-Z0-9]{5,8})\b",
+    re.I,
 )
 _RE_BOOKING_ROW = re.compile(
     r"^\s*(CONFIRMED|CANCELLED|WAITLISTED|HOLD)\s+(" + _DATE + r")"
@@ -77,6 +78,7 @@ _RE_BOOKING_ROW = re.compile(
 _RE_TOTAL_PAX  = re.compile(r"IndiGo\s+Passenger\s*-\s*\d+\s*/\s*(\d+)", re.I)
 _RE_FARE_TYPE  = re.compile(r"Fare\s*Type\s*:\s*([A-Za-z0-9 +/&-]+)", re.I)
 _RE_BAGGAGE    = re.compile(r"Check-?in\s*Baggage\s*:\s*(\d+)\s*[Kk][Gg]", re.I)
+_RE_HAND_BAGGAGE = re.compile(r"Hand\s*Baggage\s*:\s*.*?up to\s*(\d+)\s*[Kk][Gg]", re.I)
 _RE_CURRENCY   = re.compile(r"\b(INR|USD|AED|SAR|EUR|GBP)\b")
 _RE_TOTAL_FARE = re.compile(
     r"(?:Grand\s*)?Total\s*(?:Fare|Amount|Charges)?\s*[:\-]?\s*(?:INR|Rs\.?)?\s*([\d,]+(?:\.\d{1,2})?)",
@@ -139,6 +141,22 @@ _RE_S2 = re.compile(
     re.I,
 )
 
+# S2b: wrapped table row format where aircraft/check-in fields may spill onto
+# the next line(s), e.g.:
+#   03 May 26 Visakhapatnam 10:40 6E6294
+#   (A321) 09:40 Hyderabad 11:55
+_RE_S2_WRAPPED = re.compile(
+    r"(?P<date>" + _DATE + r")\s+"
+    r"(?P<dep_city>" + _CITY_CC + r"{1,50}?)\s+"
+    r"(?P<dep_time>" + _TIME + r")\s+"
+    r"(?P<flight>" + _FN + r")"
+    r"(?:\s*\([^)]{2,20}\))?"
+    r"(?:\s+(?P<checkin>" + _TIME + r"))?\s+"
+    r"(?P<arr_city>" + _CITY_CC + r"{1,50}?)\s+"
+    r"(?P<arr_time>" + _TIME + r"(?:\+\d+)?)",
+    re.I,
+)
+
 # S3: compact single-line fallback
 _RE_S3 = re.compile(
     r"(" + _DATE + r")\s+"
@@ -156,9 +174,53 @@ _RE_S3 = re.compile(
 # ---------------------------------------------------------------------------
 # Seat / service
 # ---------------------------------------------------------------------------
-_RE_ROUTE_HDR    = re.compile(r"^([A-Z]{3})\s*[-]?\s*([A-Z]{3})$")
+_RE_ROUTE_HDR    = re.compile(r"^(?:([A-Z]{3})\s*[-]?\s*([A-Z]{3})|([A-Z]{3})([A-Z]{3}))$")
 _RE_SEAT         = re.compile(r"\b(\d{1,3}[A-HJ-Z])\b")
 _RE_SERVICE_CODE = re.compile(r"\b([A-Z]{4})\b")
+
+
+def _parse_service_payload(payload: str) -> List[Dict[str, str]]:
+    items: List[Dict[str, str]] = []
+    seen = set()
+
+    parts = [part.strip(" .:-") for part in re.split(r"[,|\t]+", payload or "") if part.strip(" .:-")]
+    for part in parts:
+        token = _c(part)
+        upper = token.upper()
+        item = None
+
+        if upper in MEAL_CODES:
+            item = {"code": upper, "name": MEAL_CODES[upper], "type": "meal"}
+        elif upper in ANCILLARY_CODES:
+            item = {"code": upper, "name": ANCILLARY_CODES[upper], "type": "ancillary"}
+        elif re.search(r"\b(?:bag|baggage|travell?er)\b", token, re.I):
+            item = {"code": "N/A", "name": token, "type": "ancillary"}
+
+        if not item:
+            continue
+
+        dedupe_key = (item["type"], item["code"], item["name"].lower())
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        items.append(item)
+
+    return items
+
+
+def _extract_seat_service_pairs(line: str) -> List[Dict[str, str]]:
+    """Extract one or more seat/service cells from a single line."""
+    pairs: List[Dict[str, str]] = []
+    matches = list(_RE_SEAT.finditer(line or ""))
+    if not matches:
+        return pairs
+
+    for idx, match in enumerate(matches):
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(line)
+        payload = _c(line[start:end])
+        pairs.append({"seat": match.group(1), "payload": payload})
+    return pairs
 
 # ---------------------------------------------------------------------------
 # City -> IATA lookup table
@@ -173,7 +235,7 @@ _CITY_IATA: Dict[str, str] = {
     "GOA": "GOI", "GORAKHPUR": "GOP", "GUWAHATI": "GAU",
     "HUBLI": "HBX", "HYDERABAD": "HYD", "IMPHAL": "IMF", "INDORE": "IDR",
     "JAIPUR": "JAI", "JAMMU": "IXJ", "JODHPUR": "JDH",
-    "KOCHI": "COK", "KOLKATA": "CCU", "KOZHIKODE": "CCJ",
+    "KOCHI": "COK", "KOLKATA": "CCU", "KOZHIKODE": "CCJ", "CALICUT": "CCJ",
     "LEH": "IXL", "LUCKNOW": "LKO", "MADURAI": "IXM",
     "MANGALORE": "IXE", "MUMBAI": "BOM", "MYSORE": "MYQ",
     "NAGPUR": "NAG", "NEW DELHI": "DEL", "PATNA": "PAT",
@@ -225,7 +287,14 @@ def try_indigo_parse(raw_text: str) -> Optional[Dict]:
     passengers = _extract_passengers(text, baggage, booking.get("grand_total"))
 
     r2s         = _route_map(segments)
-    assignments = _parse_seats_and_services(text, r2s)
+    if _has_compact_multicolumn_services_table(text):
+        compact_assignments = _parse_seats_and_services_compact(text, r2s)
+        sequential_assignments = _parse_seats_and_services_sequential(text, segments)
+        assignments = _merge_assignments(compact_assignments, sequential_assignments)
+    else:
+        assignments = _parse_seats_and_services(text, r2s)
+        sequential_assignments = _parse_seats_and_services_sequential(text, segments)
+        assignments = _merge_assignments(assignments, sequential_assignments)
     _apply_assignments(passengers, assignments)
 
     booking["phone"] = contact.get("phone", "N/A")
@@ -393,7 +462,7 @@ def _extract_booking(text):
     cm = _RE_CURRENCY.search(text)
     tm = _RE_TOTAL_FARE.search(text)
 
-    pnr    = pm.group(1).upper()      if pm else "N/A"
+    pnr    = pm.group(1).upper() if pm else (_extract_pnr(text) or "N/A")
     status = rm.group(1).title()      if rm else "N/A"
     bdate  = _norm_date(rm.group(2))  if rm else "N/A"
     pay    = rm.group(3).title()      if rm else "N/A"
@@ -436,8 +505,19 @@ def _extract_contact(text):
 
 
 def _extract_baggage(text):
-    m = _RE_BAGGAGE.search(text)
-    return (m.group(1) + " Kg") if m else "N/A"
+    checkin = _RE_BAGGAGE.search(text)
+    hand = _RE_HAND_BAGGAGE.search(text)
+
+    checkin_text = f"{checkin.group(1)} Kg Check-in Baggage" if checkin else None
+    hand_text = f"{hand.group(1)} Kg Cabin Baggage" if hand else None
+
+    if hand_text and checkin_text:
+        return f"{hand_text} + {checkin_text}"
+    if checkin_text:
+        return checkin_text
+    if hand_text:
+        return hand_text
+    return "N/A"
 
 
 # ===========================================================================
@@ -546,9 +626,35 @@ def _extract_segments(text):
             ))
 
     if not segments:
+        # Sliding-window join for wrapped table rows where the flight row spills
+        # across the next line (aircraft type / check-in close / arrival city-time).
+        for i in range(len(lines)):
+            chunk_parts = []
+            for j in range(i, min(i + 4, len(lines))):
+                cl = _c(lines[j])
+                if not cl:
+                    continue
+                if j > i and re.search(r"^(Seats\s+and\s+Additional\s+Services|IndiGo\s+Passenger|Travel\s+and\s+Baggage)", cl, re.I):
+                    break
+                chunk_parts.append(cl)
+            if not chunk_parts:
+                continue
+            chunk = _c(" ".join(chunk_parts))
+            for m in _RE_S2_WRAPPED.finditer(chunk):
+                add(_make_segment(
+                    m.group("date"),    m.group("dep_city"), m.group("dep_time"),
+                    m.group("flight"),  m.group("arr_city"), m.group("arr_time"),
+                ))
+
+    if not segments:
         # Fallback: join all lines (handles wrapped rows)
         joined = _c(text.replace("\n", " "))
         for m in _RE_S2.finditer(joined):
+            add(_make_segment(
+                m.group("date"),    m.group("dep_city"), m.group("dep_time"),
+                m.group("flight"),  m.group("arr_city"), m.group("arr_time"),
+            ))
+        for m in _RE_S2_WRAPPED.finditer(joined):
             add(_make_segment(
                 m.group("date"),    m.group("dep_city"), m.group("dep_time"),
                 m.group("flight"),  m.group("arr_city"), m.group("arr_time"),
@@ -609,7 +715,6 @@ def _extract_passenger_names(text):
     (where each name appears once per leg) produce one entry each.
     """
     names = []
-    seen  = set()
 
     for raw_line in text.split("\n"):
         m = _RE_NAME_LINE.match(raw_line)
@@ -627,8 +732,22 @@ def _extract_passenger_names(text):
         if cleaned == "N/A":
             continue
         key = cleaned.lower()
-        if key not in seen:
-            seen.add(key)
+
+        replaced = False
+        skip = False
+        for idx, existing in enumerate(names):
+            ex_key = existing.lower()
+            if key == ex_key:
+                skip = True
+                break
+            if key.startswith(ex_key) and len(key) > len(ex_key):
+                names[idx] = cleaned
+                replaced = True
+                break
+            if ex_key.startswith(key) and len(ex_key) > len(key):
+                skip = True
+                break
+        if not skip and not replaced:
             names.append(cleaned)
 
     return names
@@ -666,13 +785,12 @@ def _store(assignments, name, route, payload, r2s):
     idx = r2s.get(route)
     if idx is None:
         return
-    sm    = _RE_SEAT.search(payload)
-    codes = [c.upper() for c in _RE_SERVICE_CODE.findall(payload)
-             if c.upper() in MEAL_CODES or c.upper() in ANCILLARY_CODES]
+    sm = _RE_SEAT.search(payload)
+    service_items = _parse_service_payload(payload)
     assignments.setdefault(name.lower(), []).append({
         "segment_index": idx,
         "seat":          sm.group(1) if sm else None,
-        "service_codes": codes,
+        "service_items": service_items,
     })
 
 
@@ -694,7 +812,9 @@ def _parse_seats_and_services(text, r2s):
             continue
         rh = _RE_ROUTE_HDR.match(line.replace(" ", "").replace("-", ""))
         if rh:
-            cur_route = (rh.group(1), rh.group(2))
+            dep = rh.group(1) or rh.group(3)
+            arr = rh.group(2) or rh.group(4)
+            cur_route = (dep, arr)
             pending   = None
             continue
         if re.match(r"Passenger\s+Name", line, re.I):
@@ -722,6 +842,247 @@ def _parse_seats_and_services(text, r2s):
     return assignments
 
 
+def _parse_seats_and_services_compact(text, r2s):
+    """Parse compact multi-column IndiGo service tables grouped by route headers."""
+    assignments = {}
+    lines = text.split("\n")
+    in_section = False
+    current_routes = []
+    in_rows = False
+    pending_name = None
+
+    def add_pairs(name: str, line: str):
+        pairs = _extract_seat_service_pairs(line)
+        if not pairs:
+            return False
+        for idx, pair in enumerate(pairs):
+            if idx >= len(current_routes):
+                continue
+            route = current_routes[idx]
+            seg_idx = r2s.get(route)
+            if seg_idx is None:
+                continue
+            assignments.setdefault(name.lower(), []).append({
+                "segment_index": seg_idx,
+                "seat": pair.get("seat"),
+                "service_items": _parse_service_payload(pair.get("payload", "")),
+            })
+        return True
+
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        line = _c(raw)
+        if not line:
+            i += 1
+            continue
+
+        if re.search(r"Seats\s+and\s+Additional\s+Services", line, re.I):
+            in_section = True
+            current_routes = []
+            in_rows = False
+            pending_name = None
+            i += 1
+            continue
+
+        if not in_section:
+            i += 1
+            continue
+
+        if re.search(
+            r"^(?:Status|IndiGo\s+Passenger|Check-in\s+now|Flight\s+Status|IndiGo\s+Flight\(s\)|Fare\s+Type|Travel\s+and\s+Baggage|Terms\s+&\s+Conditions|For\s+Your\s+Benefits)\b",
+            line,
+            re.I,
+        ):
+            in_section = False
+            current_routes = []
+            in_rows = False
+            pending_name = None
+            continue
+
+        compact = line.replace(" ", "").replace("-", "")
+        rh = _RE_ROUTE_HDR.match(compact)
+        if rh:
+            dep = rh.group(1) or rh.group(3)
+            arr = rh.group(2) or rh.group(4)
+            if in_rows:
+                current_routes = []
+                in_rows = False
+                pending_name = None
+            current_routes.append((dep, arr))
+            i += 1
+            continue
+
+        if re.match(r"Passenger\s+name", line, re.I):
+            in_rows = True
+            pending_name = None
+            i += 1
+            continue
+        if re.match(r"Seat$", line, re.I) or re.match(r"Services\s+Purchased", line, re.I):
+            i += 1
+            continue
+
+        if not in_rows:
+            i += 1
+            continue
+
+        m = _RE_NAME_LINE.match(raw)
+        if m:
+            candidate = normalize_name(m.group(1))
+            if candidate != "N/A":
+                if i + 1 < len(lines):
+                    nxt_raw = lines[i + 1].strip()
+                    if nxt_raw and re.fullmatch(r"[A-Za-z][A-Za-z .'\-]{1,60}", nxt_raw) and not _RE_NAME_LINE.match(nxt_raw):
+                        merged = normalize_name(m.group(1) + " " + nxt_raw)
+                        if merged != "N/A":
+                            candidate = merged
+                            i += 1
+                pending_name = candidate
+            i += 1
+            continue
+
+        if pending_name and add_pairs(pending_name, line):
+            pending_name = None
+            i += 1
+            continue
+
+        i += 1
+
+    return assignments
+
+
+def _parse_seats_and_services_sequential(text, segments):
+    """Fallback for PDF-extracted multi-segment seat tables with scrambled route headers."""
+    assignments = {}
+    lines = text.split("\n")
+    in_section = False
+    pending_name = None
+    seat_service_pairs = []
+
+    def flush_pending():
+        nonlocal pending_name, seat_service_pairs
+        if pending_name and seat_service_pairs:
+            assignments.setdefault(pending_name.lower(), [])
+            for idx, pair in enumerate(seat_service_pairs[:len(segments)]):
+                assignments[pending_name.lower()].append({
+                    "segment_index": idx,
+                    "seat": pair.get("seat"),
+                    "service_items": _parse_service_payload(pair.get("payload", "")),
+                })
+        pending_name = None
+        seat_service_pairs = []
+
+    i = 0
+    while i < len(lines):
+        line = _c(lines[i])
+        if not line:
+            i += 1
+            continue
+        if re.search(r"Seats\s+and\s+Additional\s+Services", line, re.I):
+            in_section = True
+            i += 1
+            continue
+        if in_section and re.search(
+            r"^(?:Status|IndiGo\s+Passenger|Check-in\s+now|Flight\s+Status|IndiGo\s+Flight\(s\)|Fare\s+Type|Travel\s+and\s+Baggage)\b",
+            line,
+            re.I,
+        ):
+            flush_pending()
+            in_section = False
+            continue
+        if not in_section:
+            i += 1
+            continue
+        if re.search(r"^(?:Travel\s+and\s+Baggage|Fare\s+Type|Terms\s+&\s+Conditions|For\s+Your\s+Benefits)\b", line, re.I):
+            flush_pending()
+            break
+        if re.match(r"Passenger\s+name", line, re.I) or re.match(r"Seat$", line, re.I) or re.match(r"Services\s+Purchased", line, re.I):
+            i += 1
+            continue
+
+        if pending_name:
+            inline_pairs = _extract_seat_service_pairs(line)
+            if inline_pairs:
+                if len(inline_pairs) == 1 and not inline_pairs[0]["payload"]:
+                    payload = ""
+                    if i + 1 < len(lines):
+                        nxt = _c(lines[i + 1])
+                        if nxt and not _RE_NAME_LINE.match(nxt) and not _extract_seat_service_pairs(nxt):
+                            payload = nxt
+                            i += 1
+                    inline_pairs[0]["payload"] = payload
+                seat_service_pairs.extend(inline_pairs)
+                i += 1
+                continue
+
+        m = _RE_NAME_LINE.match(lines[i])
+        if m:
+            candidate = normalize_name(m.group(1))
+            if candidate != "N/A":
+                flush_pending()
+                # Merge a split surname line like "Mr. Ajit kumar Yugal" + "kishor"
+                if i + 1 < len(lines):
+                    nxt_raw = lines[i + 1].strip()
+                    if nxt_raw and re.fullmatch(r"[A-Za-z][A-Za-z .'\-]{1,40}", nxt_raw) and not _RE_NAME_LINE.match(nxt_raw):
+                        merged = normalize_name(m.group(1) + " " + nxt_raw)
+                        if merged != "N/A":
+                            candidate = merged
+                            i += 1
+                pending_name = candidate
+            i += 1
+            continue
+
+        i += 1
+
+    flush_pending()
+    return assignments
+
+
+def _has_compact_multicolumn_services_table(text: str) -> bool:
+    header_repeats = re.search(
+        r"Passenger\s+name\s+Seat\s+Services\s+Purchased\s+Seat\s+Services\s+Purchased",
+        _c(text),
+        re.I,
+    )
+    compact_routes = re.search(r"^\s*[A-Z]{6}\s*$", text, re.M)
+    return bool(header_repeats or compact_routes)
+
+
+def _merge_assignments(primary, secondary):
+    merged = {k: list(v) for k, v in (primary or {}).items()}
+    for name, items in (secondary or {}).items():
+        bucket = merged.setdefault(name, [])
+        for item in items:
+            seat = item.get("seat")
+            service_items = item.get("service_items", [])
+            existing = None
+            for candidate in bucket:
+                if candidate.get("segment_index") == item.get("segment_index"):
+                    existing = candidate
+                    break
+            if existing is None:
+                bucket.append({
+                    "segment_index": item.get("segment_index", 0),
+                    "seat": seat,
+                    "service_items": list(service_items),
+                })
+                continue
+
+            if not existing.get("seat") and seat:
+                existing["seat"] = seat
+
+            seen = {
+                (svc.get("type"), svc.get("code"), svc.get("name"))
+                for svc in existing.get("service_items", [])
+            }
+            for svc in service_items:
+                key = (svc.get("type"), svc.get("code"), svc.get("name"))
+                if key not in seen:
+                    existing.setdefault("service_items", []).append(svc)
+                    seen.add(key)
+    return merged
+
+
 def _apply_assignments(passengers, assignments):
     for pax in passengers:
         key = pax["name"].lower()
@@ -733,14 +1094,19 @@ def _apply_assignments(passengers, assignments):
                 for e in pax["seats"]
             ):
                 pax["seats"].append({"segment_index": sidx, "seat_number": seat})
-            for code in item.get("service_codes", []):
+            for service in item.get("service_items", []):
                 entry  = {
                     "segment_index": sidx,
-                    "code":          code,
-                    "name":          MEAL_CODES.get(code) or ANCILLARY_CODES.get(code, code),
+                    "code":          service.get("code", "N/A"),
+                    "name":          service.get("name", "N/A"),
                 }
-                target = pax["meals"] if code in MEAL_CODES else pax["ancillaries"]
-                if not any(e["segment_index"] == sidx and e["code"] == code for e in target):
+                target = pax["meals"] if service.get("type") == "meal" else pax["ancillaries"]
+                if not any(
+                    e["segment_index"] == sidx
+                    and e.get("code") == entry["code"]
+                    and e.get("name") == entry["name"]
+                    for e in target
+                ):
                     target.append(entry)
 
 
