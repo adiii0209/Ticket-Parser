@@ -275,6 +275,7 @@ _TIME_CONTEXT_HINT = re.compile(
 )
 _IATA_TOKEN = re.compile(r"\b[A-Z]{3}\b")
 _RE_AIRPORT_DETAIL_LINE = re.compile(r"^([A-Z]{3})\s*[-(]", re.IGNORECASE)
+_RE_DAY_OFFSET = re.compile(r"(?:\+([1-3])\b|\b(next|same)\s+day\b)", re.IGNORECASE)
 _RE_INLINE_PHONE = re.compile(r"\b([6-9]\d{9})\b")
 _INLINE_PHONE_CONTEXT = re.compile(
     r"(?:\b(?:adult|child|infant|passenger|travell?er)\b|\||@)",
@@ -348,7 +349,13 @@ def _extract_airport_linked_events(text: str) -> list[dict]:
             continue
 
         for time_value in matches:
-            event = {"airport": airport_code, "time": time_value, "date": None}
+            event = {"airport": airport_code, "time": time_value, "date": None, "day_offset": None}
+            offset_match = _RE_DAY_OFFSET.search(line)
+            if offset_match:
+                if offset_match.group(1):
+                    event["day_offset"] = int(offset_match.group(1))
+                else:
+                    event["day_offset"] = 1 if (offset_match.group(2) or "").lower() == "next" else 0
             for look_back in range(1, 4):
                 prev_idx = idx - look_back
                 if prev_idx < 0:
@@ -356,6 +363,13 @@ def _extract_airport_linked_events(text: str) -> list[dict]:
                 prev_line = lines[prev_idx]
                 if not prev_line:
                     continue
+                if event["day_offset"] is None:
+                    offset_match = _RE_DAY_OFFSET.search(prev_line)
+                    if offset_match:
+                        if offset_match.group(1):
+                            event["day_offset"] = int(offset_match.group(1))
+                        else:
+                            event["day_offset"] = 1 if (offset_match.group(2) or "").lower() == "next" else 0
                 date_match = _RE_DATE.search(prev_line)
                 if date_match:
                     event["date"] = _norm_date(date_match.group(1), date_match.group(2), date_match.group(3))
@@ -384,6 +398,70 @@ def _match_ordered_airport_events(segments: list[dict], airport_events: list[dic
             matched.append(match or {})
 
     return matched
+
+
+def _apply_explicit_day_offset(base_date: str | None, day_offset: int | None) -> str | None:
+    if not base_date or base_date == "N/A" or day_offset is None:
+        return base_date
+    for fmt in _DATE_FMTS:
+        try:
+            dt = datetime.strptime(base_date, fmt)
+            adjusted = dt + timedelta(days=day_offset)
+            return adjusted.strftime("%d %b %y")
+        except ValueError:
+            continue
+    return base_date
+
+
+def _format_norm_date(value: datetime) -> str:
+    return value.strftime("%d %b %y")
+
+
+def _validate_segment_dates_with_timezones(seg: dict, arr_event: dict | None = None) -> None:
+    """Use explicit day offsets first, then timezone ordering to repair impossible arrival dates."""
+    dep = seg.get("departure", {})
+    arr = seg.get("arrival", {})
+
+    dep_date = dep.get("date", "N/A")
+    arr_date = arr.get("date", "N/A")
+    dep_time = dep.get("time", "N/A")
+    arr_time = arr.get("time", "N/A")
+    dep_airport = dep.get("airport", "")
+    arr_airport = arr.get("airport", "")
+
+    if dep_date in ("N/A", None, "") or dep_time in ("N/A", None, ""):
+        return
+
+    explicit_offset = None if not arr_event else arr_event.get("day_offset")
+    if explicit_offset is not None:
+        adjusted = _apply_explicit_day_offset(dep_date, explicit_offset)
+        if adjusted:
+            arr["date"] = adjusted
+            seg["arrival"] = arr
+            arr_date = adjusted
+
+    if arr_date in ("N/A", None, "") or arr_time in ("N/A", None, ""):
+        return
+
+    dep_naive = _parse_naive(dep_date, dep_time)
+    arr_naive = _parse_naive(arr_date, arr_time)
+    if dep_naive is None or arr_naive is None:
+        return
+
+    dep_tz = AIRPORT_TZ_MAP.get(dep_airport.upper(), "UTC")
+    arr_tz = AIRPORT_TZ_MAP.get(arr_airport.upper(), "UTC")
+    dep_utc = _to_utc(dep_naive, dep_tz)
+    arr_utc = _to_utc(arr_naive, arr_tz)
+
+    if arr_utc < dep_utc:
+        repaired_date = _apply_explicit_day_offset(dep_date, 1)
+        if repaired_date:
+            repaired_naive = _parse_naive(repaired_date, arr_time)
+            if repaired_naive is not None:
+                repaired_utc = _to_utc(repaired_naive, arr_tz)
+                if repaired_utc >= dep_utc:
+                    arr["date"] = repaired_date
+                    seg["arrival"] = arr
 
 # ── patterns ──────────────────────────────────────────────────────────────────
 
@@ -972,8 +1050,7 @@ def regex_extract(text: str) -> dict:
     m = _RE_BK_CLASS.search(text)
     r["booking_class"] = m.group(1).upper() if m else None
 
-    m = _RE_DURATION.search(text)
-    r["duration_extracted"] = f"{m.group(1)}h {m.group(2) or '0'}m" if m else None
+    r["duration_extracted"] = None
 
     # ── GST details ───────────────────────────────────────────────────────────
     m = _RE_GST_NUMBER.search(text)
@@ -1051,6 +1128,8 @@ RULES:
 - Segment departure/arrival times must come only from itinerary/flight segments.
   Ignore booking, issued, payment, check-in, web check-in, boarding, gate,
   reporting, contact/support, and office-hours times even if they look valid.
+- Never derive or back-calculate departure/arrival time from flight duration, layover duration,
+  elapsed time, or journey total. Times must be explicitly shown for that segment.
 - When a standalone time is followed by an airport-detail line like "CCU-..." or
   "BOM-...", treat that time as belonging to that airport segment.
 - For multi-segment, layover, or return itineraries, extract segment endpoints in travel order.
@@ -1060,6 +1139,10 @@ RULES:
 - If a segment shows arrival on the next day or with a day offset like `+1`, assign the correct arrival date.
 - If an arrival time is earlier than the departure time and the ticket indicates overnight travel,
   keep the arrival date on the next calendar day rather than copying the departure date.
+- Validate dates using explicit day-offset markers first, then verify the segment timing order against
+  the departure/arrival airport timezones. If the stated dates are impossible for that segment ordering,
+  correct only the segment date that is clearly offset-driven; otherwise return "N/A" rather than guessing.
+- `duration_extracted` must always be "N/A". Do not extract or infer it from ticket text.
 - Departure/arrival terminals must be tied to the respective airport only.
   Never copy a terminal from the destination airport to the origin airport or vice versa.
   If a terminal is shown for only one airport, keep the other terminal as "N/A".
@@ -1150,7 +1233,7 @@ OUTPUT SCHEMA (return exactly this structure):
         "time": "HH:MM or N/A",
         "terminal": "string or N/A"
       },
-      "duration_extracted": "Xh Ym or N/A"
+      "duration_extracted": "N/A"
     }
   ],
   "barcode": "string or null"
@@ -1522,9 +1605,7 @@ def merge(llm_data: dict, rx: dict) -> dict:
         if rx.get("booking_class") and seg.get("booking_class") in ("N/A",None,""):
             seg["booking_class"] = rx["booking_class"]
         seg.setdefault("booking_class","N/A")
-        if rx.get("duration_extracted") and seg.get("duration_extracted") in ("N/A",None,""):
-            seg["duration_extracted"] = rx["duration_extracted"]
-        seg.setdefault("duration_extracted","N/A")
+        seg["duration_extracted"] = "N/A"
 
         dep_ep = seg.get("departure", {})
         arr_ep = seg.get("arrival", {})
@@ -1584,6 +1665,8 @@ def merge(llm_data: dict, rx: dict) -> dict:
                           ("time","N/A"),("terminal","N/A")]:
                 ep.setdefault(f,d)
             seg[endpoint] = ep
+
+        _validate_segment_dates_with_timezones(seg, arr_event)
 
     llm_data["segments"] = segments
     return llm_data
