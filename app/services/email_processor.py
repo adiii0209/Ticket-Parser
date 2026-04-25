@@ -105,13 +105,17 @@ def process_single_email(email):
             print("[PROCESSOR] No readable content found", flush=True)
             return None
 
-    pnr = extract_pnr(raw_text)
+    subject_text = str(email.get("subject") or "")
+    pnr_scan_text = f"{subject_text}\n{raw_text}"
+    pnr = extract_pnr(pnr_scan_text)
 
-    if not pnr:
-        print(f"[PROCESSOR] No valid PNR found in content from {email['from']}.", flush=True)
-        return None
-
-    print(f"[PROCESSOR] Valid PNR detected: {pnr}", flush=True)
+    if pnr:
+        print(f"[PROCESSOR] Valid PNR detected: {pnr}", flush=True)
+    else:
+        print(
+            f"[PROCESSOR] No valid PNR found in subject/body precheck for {email['from']}; continuing parse.",
+            flush=True,
+        )
 
     batch_id = _build_batch_id(email)
     batch_label = _build_batch_label(email)
@@ -138,7 +142,7 @@ def process_single_email(email):
             print("[PROCESSOR] Ticket parsed successfully via LLM (or fallback)", flush=True)
 
         bk = parsed_ticket.get("booking", {})
-        if isinstance(parsed_ticket, dict) and not bk.get("pnr"):
+        if isinstance(parsed_ticket, dict) and not bk.get("pnr") and pnr:
             if "booking" not in parsed_ticket:
                 parsed_ticket["booking"] = {}
             parsed_ticket["booking"]["pnr"] = pnr
@@ -151,6 +155,10 @@ def process_single_email(email):
     if not ticket_payloads:
         print("[PROCESSOR] Parser returned no ticket payloads.", flush=True)
         return False
+
+    if not any((ticket.get("booking", {}) or {}).get("pnr") not in (None, "", "N/A") for ticket in ticket_payloads):
+        print(f"[PROCESSOR] Parsed payload has no valid PNR for {email['from']}.", flush=True)
+        return None
 
     print(
         f"[PROCESSOR] Forwarding {len(ticket_payloads)} parsed ticket(s) for batch {batch_id}",
