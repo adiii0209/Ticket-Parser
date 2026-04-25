@@ -2,6 +2,8 @@ import base64
 import re
 from .auth import get_gmail_service
 from app.services.email_processor import process_single_email
+from llm_extractor import _extract_pnr
+from mappings import AIRPORT_CODES
 from app.queue.event_store import (
     is_gmail_msg_processed,
     track_gmail_msg,
@@ -26,10 +28,22 @@ AIRLINE_DOMAINS = [
     "goair"
 ]
 
+AGENCY_HINTS = [
+    "tours",
+    "travels",
+    "travel",
+    "holiday",
+    "holidays",
+    "trip",
+    "booking",
+]
+
 STRONG_TERMS = [
     "passenger name record",
     "booking reference",
     "e-ticket",
+    "flight ticket",
+    "flight booking",
     "flight itinerary",
     "boarding pass",
     "departure",
@@ -49,26 +63,44 @@ AIRPORT_CODE_REGEX = r"\b[A-Z]{3}\b"
 
 
 def is_flight_email(subject: str, body: str, from_email: str) -> bool:
-    combined = f"{subject} {body}".lower()
-    score = 0
+    subject = subject or ""
+    body = body or ""
+    combined = f"{subject}\n{body}"
+    combined_lower = combined.lower()
+    combined_upper = combined.upper()
+    subject_lower = subject.lower()
+    body_lower = body.lower()
+    from_lower = from_email.lower()
 
-    if any(domain in from_email.lower() for domain in AIRLINE_DOMAINS):
-        score += 3
+    has_airline_domain = any(domain in from_lower for domain in AIRLINE_DOMAINS)
+    has_agency_sender = any(hint in from_lower for hint in AGENCY_HINTS)
+    strong_hits = sum(1 for term in STRONG_TERMS if term in combined_lower)
+    has_flight_number = bool(re.search(FLIGHT_NUMBER_REGEX, combined_upper))
+    has_explicit_pnr = bool(_extract_pnr(combined))
+    airport_matches = {code for code in re.findall(AIRPORT_CODE_REGEX, combined_upper) if code in AIRPORT_CODES}
+    has_airport_pair = len(airport_matches) >= 2
+    subject_has_flight_terms = any(
+        term in subject_lower
+        for term in ("flight", "ticket", "itinerary", "booking", "pnr", "boarding pass", "e-ticket")
+    )
+    body_has_flight_terms = any(
+        term in body_lower
+        for term in ("flight", "ticket", "itinerary", "booking", "pnr", "boarding pass", "e-ticket")
+    )
 
-    if any(term in combined for term in STRONG_TERMS):
-        score += 2
-
-    if re.search(FLIGHT_NUMBER_REGEX, combined.upper()):
-        score += 2
-
-    airport_matches = re.findall(AIRPORT_CODE_REGEX, combined.upper())
-    if len(airport_matches) >= 2:
-        score += 1
-
-    if re.search(STRICT_PNR_REGEX, combined.upper()):
-        score += 2
-
-    return score >= 2
+    if has_airline_domain and (has_explicit_pnr or has_flight_number or has_airport_pair or strong_hits >= 2):
+        return True
+    if has_explicit_pnr and (has_flight_number or has_airport_pair or strong_hits >= 2):
+        return True
+    if has_flight_number and has_airport_pair and strong_hits >= 2:
+        return True
+    if has_agency_sender and subject_has_flight_terms and body_has_flight_terms:
+        return True
+    if has_agency_sender and subject_has_flight_terms and (has_explicit_pnr or has_flight_number or has_airport_pair or strong_hits >= 2):
+        return True
+    if subject_has_flight_terms and body_has_flight_terms and (has_explicit_pnr or has_flight_number or has_airport_pair):
+        return True
+    return False
 
 
 # -------------------------------------------
@@ -167,8 +199,12 @@ def _fetch_and_process_single(service, msg_id: str, event_id: int = None) -> boo
                 "raw_message": message
             })
 
-            if success:
+            if success is True:
                 mark_as_read(msg_id)
+                track_gmail_msg(msg_id, event_id)
+                return True
+            elif success is None:
+                print("âŒ [GMAIL] Skipping message after parser precheck (no ticket/PNR)", flush=True)
                 track_gmail_msg(msg_id, event_id)
                 return True
             else:
@@ -268,8 +304,11 @@ def process_inbox_now(event_id: int = None) -> bool:
                 "raw_message": message
             })
 
-            if success:
+            if success is True:
                 mark_as_read(msg_id)
+                track_gmail_msg(msg_id, event_id)
+            elif success is None:
+                print("âŒ [GMAIL] Skipping message after parser precheck (no ticket/PNR)", flush=True)
                 track_gmail_msg(msg_id, event_id)
             else:
                 any_flight_failed = True

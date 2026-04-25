@@ -28,7 +28,7 @@ try:
 except ImportError:
     raise RuntimeError("mappings.py not found. Place it in the same directory.")
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_API_KEY = "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"
 OPENROUTER_URL     = os.getenv("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
 MODEL              = os.getenv("MODEL", "openai/gpt-4o-mini")
 TEMPERATURE        = 0
@@ -276,6 +276,11 @@ _TIME_CONTEXT_HINT = re.compile(
 _IATA_TOKEN = re.compile(r"\b[A-Z]{3}\b")
 _RE_AIRPORT_DETAIL_LINE = re.compile(r"^([A-Z]{3})\s*[-(]", re.IGNORECASE)
 _RE_DAY_OFFSET = re.compile(r"(?:\+([1-3])\b|\b(next|same)\s+day\b)", re.IGNORECASE)
+_RE_MONTH_DAY_TIME_LINE = re.compile(
+    rf"^({MONTH_ABBR})\s+(\d{{1,2}}),\s*(\d{{1,2}}):(\d{{2}})\s*(AM|PM)?$",
+    re.IGNORECASE,
+)
+_RE_TERMINAL_DASH_LINE = re.compile(r"^Terminal\s*-\s*(.*)$", re.IGNORECASE)
 _RE_INLINE_PHONE = re.compile(r"\b([6-9]\d{9})\b")
 _INLINE_PHONE_CONTEXT = re.compile(
     r"(?:\b(?:adult|child|infant|passenger|travell?er)\b|\||@)",
@@ -375,6 +380,64 @@ def _extract_airport_linked_events(text: str) -> list[dict]:
                     event["date"] = _norm_date(date_match.group(1), date_match.group(2), date_match.group(3))
                     break
             events.append(event)
+
+    return events
+
+
+def _extract_structured_airport_events(text: str) -> list[dict]:
+    """Extract explicit date/time/city/airport blocks from itinerary layouts."""
+    events: list[dict] = []
+    lines = [line.strip() for line in text.splitlines()]
+
+    for idx in range(len(lines) - 2):
+        line = lines[idx]
+        if not line:
+            continue
+
+        match = _RE_MONTH_DAY_TIME_LINE.match(line)
+        if not match:
+            continue
+
+        city = lines[idx + 1].strip() if idx + 1 < len(lines) else ""
+        airport = lines[idx + 2].strip().upper() if idx + 2 < len(lines) else ""
+        if not city or not re.fullmatch(r"[A-Z]{3}", airport):
+            continue
+
+        terminal = None
+        if idx + 3 < len(lines):
+            terminal_match = _RE_TERMINAL_DASH_LINE.match(lines[idx + 3].strip())
+            if terminal_match:
+                raw_terminal = terminal_match.group(1).strip()
+                terminal = None if raw_terminal in ("", "-") else raw_terminal
+
+        month = match.group(1)
+        day = match.group(2)
+        time_value = _to_24h(match.group(3), match.group(4), match.group(5))
+        explicit_date = None
+
+        for look_around in range(max(0, idx - 3), min(len(lines), idx + 4)):
+            full_date_match = _RE_DATE.search(lines[look_around])
+            if not full_date_match:
+                continue
+            if (
+                full_date_match.group(1) == day
+                and full_date_match.group(2).lower().startswith(month.lower()[:3])
+            ):
+                explicit_date = _norm_date(
+                    full_date_match.group(1),
+                    full_date_match.group(2),
+                    full_date_match.group(3),
+                )
+                break
+
+        events.append({
+            "airport": airport,
+            "city": city,
+            "time": time_value,
+            "date": explicit_date,
+            "terminal": terminal,
+            "day_offset": None,
+        })
 
     return events
 
@@ -1044,6 +1107,7 @@ def regex_extract(text: str) -> dict:
 
     r["all_dates"] = [_norm_date(m.group(1), m.group(2), m.group(3)) for m in _RE_DATE.finditer(text)]
     r["all_times"] = _extract_segment_times(text)
+    r["airport_structured_events"] = _extract_structured_airport_events(text)
     r["airport_linked_events"] = _extract_airport_linked_events(text)
     r["terminals"] = [m.group(1).upper() for m in _RE_TERMINAL.finditer(text)]
 
@@ -1152,9 +1216,10 @@ RULES:
 - Fares -> exact numeric only (strip commas/symbols). null if absent.
 - Base fare must come only from an explicit base-fare label.
   Do not copy grand total, passenger total, or total fare into base_fare.
-- pax_type: ONLY set CHD/INF if the word child/infant appears near passenger name.
-  Default is ADT. Do NOT use "infant" matches from body text like "sufficient".
-- Titles (Mr/Mrs/Ms/Dr) before a name always indicate ADT.
+- pax_type: extract from the actual passenger/traveller details using the ticket text.
+  Use ADT/CHD/INF, but do not guess from unrelated body text.
+- Seats: extract from the actual passenger/segment details using the ticket text.
+  Do not rely on regex-only seat snippets when the segment/passenger mapping is explicit in the ticket.
 - class_of_travel: ONLY from fare/cabin/class labels. "Business Park" is NOT Business class.
 - Ticket number -> full numeric string (10-14 digits) or "N/A"
 - Seats -> link to segment_index (0-based)
@@ -1426,14 +1491,10 @@ def merge(llm_data: dict, rx: dict) -> dict:
             pax["frequent_flyer_number"] = "N/A"
         pax.setdefault("frequent_flyer_number","N/A")
 
-        # FIX: pax_type — regex wins, never override ADT with body-text false positive
+        # pax_type is LLM-first; regex only fills missing values.
         rx_pts = rx.get("pax_types",["ADT"])
-        if i < len(rx_pts):
+        if pax.get("pax_type") in (None, "", "N/A") and i < len(rx_pts):
             pax["pax_type"] = rx_pts[i]
-        # Sanity: if pax name has title prefix, it's always ADT
-        name = pax.get("name","")
-        if re.match(r"^(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+", name, re.IGNORECASE):
-            pax["pax_type"] = "ADT"
         pax.setdefault("pax_type","ADT")
 
         if rx.get("baggage"): pax["baggage"] = rx["baggage"]
@@ -1513,7 +1574,7 @@ def merge(llm_data: dict, rx: dict) -> dict:
             fare.setdefault(f, None)
         pax["fare"] = fare
 
-        # Only use raw seat fallback when it is unambiguous.
+        # Seats are LLM-first; only use raw regex seat fallback when missing and unambiguous.
         if rx.get("seats_raw") and not pax.get("seats"):
             if len(passengers) == 1:
                 pax["seats"] = [{"segment_index": j, "seat_number": s}
@@ -1578,11 +1639,13 @@ def merge(llm_data: dict, rx: dict) -> dict:
     flt_nums  = rx.get("flight_numbers",[])
     all_dates = rx.get("all_dates",[])
     all_times = rx.get("all_times",[])
+    airport_structured_events = rx.get("airport_structured_events", [])
     airport_linked_events = rx.get("airport_linked_events", [])
     terminals = rx.get("terminals",[])
     paren_ap  = rx.get("paren_airports",{})
 
-    ordered_endpoint_events = _match_ordered_airport_events(segments, airport_linked_events)
+    ordered_structured_events = _match_ordered_airport_events(segments, airport_structured_events)
+    ordered_linked_events = _match_ordered_airport_events(segments, airport_linked_events)
 
     for i, seg in enumerate(segments):
         current_flight = _normalize_flight_candidate(seg.get("flight_number"), seg.get("airline"))
@@ -1611,22 +1674,39 @@ def merge(llm_data: dict, rx: dict) -> dict:
         arr_ep = seg.get("arrival", {})
         dep_airport = (dep_ep.get("airport") or "").upper()
         arr_airport = (arr_ep.get("airport") or "").upper()
-        dep_event = ordered_endpoint_events[i * 2] if i * 2 < len(ordered_endpoint_events) else {}
-        arr_event = ordered_endpoint_events[i * 2 + 1] if i * 2 + 1 < len(ordered_endpoint_events) else {}
-        dep_linked_time = dep_event.get("time")
-        arr_linked_time = arr_event.get("time")
+        dep_structured = ordered_structured_events[i * 2] if i * 2 < len(ordered_structured_events) else {}
+        arr_structured = ordered_structured_events[i * 2 + 1] if i * 2 + 1 < len(ordered_structured_events) else {}
+        dep_event = ordered_linked_events[i * 2] if i * 2 < len(ordered_linked_events) else {}
+        arr_event = ordered_linked_events[i * 2 + 1] if i * 2 + 1 < len(ordered_linked_events) else {}
 
-        # Ordered airport-linked events are safe enough to correct swapped/missing LLM times,
-        # even when the same airport appears multiple times across layovers or returns.
-        if dep_linked_time and arr_linked_time and dep_airport != arr_airport:
-            dep_ep["time"] = dep_linked_time
-            arr_ep["time"] = arr_linked_time
-            if dep_event.get("date") and dep_ep.get("date") in ("N/A", None, ""):
-                dep_ep["date"] = dep_event["date"]
-            if arr_event.get("date") and arr_ep.get("date") in ("N/A", None, ""):
-                arr_ep["date"] = arr_event["date"]
-            seg["departure"] = dep_ep
-            seg["arrival"] = arr_ep
+        # LLM remains the primary source for segment timings.
+        # Explicit structured regex blocks only verify/correct obviously wrong pairings.
+        if dep_structured.get("time") and dep_airport == dep_structured.get("airport"):
+            if dep_ep.get("time") in ("N/A", None, "") or dep_ep.get("time") != dep_structured.get("time"):
+                dep_ep["time"] = dep_structured["time"]
+            if dep_structured.get("date") and (
+                dep_ep.get("date") in ("N/A", None, "") or dep_ep.get("date") != dep_structured.get("date")
+            ):
+                dep_ep["date"] = dep_structured["date"]
+            if dep_structured.get("city") and dep_ep.get("city") in ("N/A", None, ""):
+                dep_ep["city"] = dep_structured["city"]
+            if dep_structured.get("terminal") and dep_ep.get("terminal") in ("N/A", None, ""):
+                dep_ep["terminal"] = dep_structured["terminal"]
+
+        if arr_structured.get("time") and arr_airport == arr_structured.get("airport"):
+            if arr_ep.get("time") in ("N/A", None, "") or arr_ep.get("time") != arr_structured.get("time"):
+                arr_ep["time"] = arr_structured["time"]
+            if arr_structured.get("date") and (
+                arr_ep.get("date") in ("N/A", None, "") or arr_ep.get("date") != arr_structured.get("date")
+            ):
+                arr_ep["date"] = arr_structured["date"]
+            if arr_structured.get("city") and arr_ep.get("city") in ("N/A", None, ""):
+                arr_ep["city"] = arr_structured["city"]
+            if arr_structured.get("terminal") and arr_ep.get("terminal") in ("N/A", None, ""):
+                arr_ep["terminal"] = arr_structured["terminal"]
+
+        seg["departure"] = dep_ep
+        seg["arrival"] = arr_ep
 
         for endpoint, t_idx, d_idx in [("departure",0,0),("arrival",1,1)]:
             ep = seg.get(endpoint,{})
@@ -1648,7 +1728,7 @@ def merge(llm_data: dict, rx: dict) -> dict:
                 if idx < len(all_times): ep["time"] = all_times[idx]
 
             event_idx = i * 2 + (0 if endpoint == "departure" else 1)
-            endpoint_event = ordered_endpoint_events[event_idx] if event_idx < len(ordered_endpoint_events) else {}
+            endpoint_event = ordered_linked_events[event_idx] if event_idx < len(ordered_linked_events) else {}
             linked_time = endpoint_event.get("time")
             if linked_time and ep.get("time") in ("N/A",None,""):
                 ep["time"] = linked_time
@@ -1666,7 +1746,7 @@ def merge(llm_data: dict, rx: dict) -> dict:
                 ep.setdefault(f,d)
             seg[endpoint] = ep
 
-        _validate_segment_dates_with_timezones(seg, arr_event)
+        _validate_segment_dates_with_timezones(seg, arr_structured or arr_event)
 
     llm_data["segments"] = segments
     return llm_data

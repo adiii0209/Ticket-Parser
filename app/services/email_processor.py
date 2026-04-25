@@ -103,13 +103,13 @@ def process_single_email(email):
 
         if not raw_text:
             print("[PROCESSOR] No readable content found", flush=True)
-            return False
+            return None
 
     pnr = extract_pnr(raw_text)
 
     if not pnr:
         print(f"[PROCESSOR] No valid PNR found in content from {email['from']}.", flush=True)
-        return False
+        return None
 
     print(f"[PROCESSOR] Valid PNR detected: {pnr}", flush=True)
 
