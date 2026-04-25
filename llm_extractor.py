@@ -318,9 +318,9 @@ def _extract_segment_times(text: str) -> list[str]:
     return preferred or fallback
 
 
-def _extract_airport_linked_times(text: str) -> dict[str, str]:
-    """Extract times only when they can be tied to a nearby airport-detail line."""
-    linked_times: dict[str, str] = {}
+def _extract_airport_linked_events(text: str) -> list[dict]:
+    """Extract ordered airport-time events tied to nearby airport-detail lines."""
+    events: list[dict] = []
     lines = [line.strip() for line in text.splitlines()]
 
     for idx, line in enumerate(lines):
@@ -348,9 +348,42 @@ def _extract_airport_linked_times(text: str) -> dict[str, str]:
             continue
 
         for time_value in matches:
-            linked_times.setdefault(airport_code, time_value)
+            event = {"airport": airport_code, "time": time_value, "date": None}
+            for look_back in range(1, 4):
+                prev_idx = idx - look_back
+                if prev_idx < 0:
+                    break
+                prev_line = lines[prev_idx]
+                if not prev_line:
+                    continue
+                date_match = _RE_DATE.search(prev_line)
+                if date_match:
+                    event["date"] = _norm_date(date_match.group(1), date_match.group(2), date_match.group(3))
+                    break
+            events.append(event)
 
-    return linked_times
+    return events
+
+
+def _match_ordered_airport_events(segments: list[dict], airport_events: list[dict]) -> list[dict]:
+    """Match repeated airports in sequence across multi-segment itineraries."""
+    matched: list[dict] = []
+    cursor = 0
+
+    for seg in segments:
+        for endpoint in ("departure", "arrival"):
+            airport = (seg.get(endpoint, {}).get("airport") or "").upper()
+            match = None
+            if airport:
+                for idx in range(cursor, len(airport_events)):
+                    candidate = airport_events[idx]
+                    if candidate.get("airport") == airport:
+                        match = candidate
+                        cursor = idx + 1
+                        break
+            matched.append(match or {})
+
+    return matched
 
 # ── patterns ──────────────────────────────────────────────────────────────────
 
@@ -933,7 +966,7 @@ def regex_extract(text: str) -> dict:
 
     r["all_dates"] = [_norm_date(m.group(1), m.group(2), m.group(3)) for m in _RE_DATE.finditer(text)]
     r["all_times"] = _extract_segment_times(text)
-    r["airport_linked_times"] = _extract_airport_linked_times(text)
+    r["airport_linked_events"] = _extract_airport_linked_events(text)
     r["terminals"] = [m.group(1).upper() for m in _RE_TERMINAL.finditer(text)]
 
     m = _RE_BK_CLASS.search(text)
@@ -1020,6 +1053,13 @@ RULES:
   reporting, contact/support, and office-hours times even if they look valid.
 - When a standalone time is followed by an airport-detail line like "CCU-..." or
   "BOM-...", treat that time as belonging to that airport segment.
+- For multi-segment, layover, or return itineraries, extract segment endpoints in travel order.
+  Do not reuse the same time/date for different segments unless the ticket explicitly shows that same value twice.
+- When the same airport appears more than once across the itinerary, keep matching times/dates by sequence,
+  not just by airport code.
+- If a segment shows arrival on the next day or with a day offset like `+1`, assign the correct arrival date.
+- If an arrival time is earlier than the departure time and the ticket indicates overnight travel,
+  keep the arrival date on the next calendar day rather than copying the departure date.
 - Departure/arrival terminals must be tied to the respective airport only.
   Never copy a terminal from the destination airport to the origin airport or vice versa.
   If a terminal is shown for only one airport, keep the other terminal as "N/A".
@@ -1055,6 +1095,9 @@ RULES:
 - Example: `BOOKING REF : AMADEUS: 9P9CUS, AIRLINE: EY/9P9CUS` -> `booking.pnr = "9P9CUS"`.
 - Example: `Airline Booking Reference EK/ECU362` -> `booking.pnr = "ECU362"`.
 - frequent_flyer_number: ONLY from FF/loyalty label lines. Not from body text.
+- Validate each segment after extraction:
+  departure/arrival airport pair, departure date+time, arrival date+time, and day offset must be internally consistent.
+  If a date or time is not explicitly tied to that segment, return "N/A" instead of guessing.
 
 OUTPUT SCHEMA (return exactly this structure):
 {
@@ -1452,9 +1495,11 @@ def merge(llm_data: dict, rx: dict) -> dict:
     flt_nums  = rx.get("flight_numbers",[])
     all_dates = rx.get("all_dates",[])
     all_times = rx.get("all_times",[])
-    airport_linked_times = rx.get("airport_linked_times", {})
+    airport_linked_events = rx.get("airport_linked_events", [])
     terminals = rx.get("terminals",[])
     paren_ap  = rx.get("paren_airports",{})
+
+    ordered_endpoint_events = _match_ordered_airport_events(segments, airport_linked_events)
 
     for i, seg in enumerate(segments):
         current_flight = _normalize_flight_candidate(seg.get("flight_number"), seg.get("airline"))
@@ -1485,13 +1530,20 @@ def merge(llm_data: dict, rx: dict) -> dict:
         arr_ep = seg.get("arrival", {})
         dep_airport = (dep_ep.get("airport") or "").upper()
         arr_airport = (arr_ep.get("airport") or "").upper()
-        dep_linked_time = airport_linked_times.get(dep_airport)
-        arr_linked_time = airport_linked_times.get(arr_airport)
+        dep_event = ordered_endpoint_events[i * 2] if i * 2 < len(ordered_endpoint_events) else {}
+        arr_event = ordered_endpoint_events[i * 2 + 1] if i * 2 + 1 < len(ordered_endpoint_events) else {}
+        dep_linked_time = dep_event.get("time")
+        arr_linked_time = arr_event.get("time")
 
-        # Airport-linked times are safe enough to correct swapped/missing LLM times.
+        # Ordered airport-linked events are safe enough to correct swapped/missing LLM times,
+        # even when the same airport appears multiple times across layovers or returns.
         if dep_linked_time and arr_linked_time and dep_airport != arr_airport:
             dep_ep["time"] = dep_linked_time
             arr_ep["time"] = arr_linked_time
+            if dep_event.get("date") and dep_ep.get("date") in ("N/A", None, ""):
+                dep_ep["date"] = dep_event["date"]
+            if arr_event.get("date") and arr_ep.get("date") in ("N/A", None, ""):
+                arr_ep["date"] = arr_event["date"]
             seg["departure"] = dep_ep
             seg["arrival"] = arr_ep
 
@@ -1514,9 +1566,14 @@ def merge(llm_data: dict, rx: dict) -> dict:
                 idx = i * 2 + t_idx
                 if idx < len(all_times): ep["time"] = all_times[idx]
 
-            linked_time = airport_linked_times.get((ep.get("airport") or "").upper())
+            event_idx = i * 2 + (0 if endpoint == "departure" else 1)
+            endpoint_event = ordered_endpoint_events[event_idx] if event_idx < len(ordered_endpoint_events) else {}
+            linked_time = endpoint_event.get("time")
             if linked_time and ep.get("time") in ("N/A",None,""):
                 ep["time"] = linked_time
+            linked_date = endpoint_event.get("date")
+            if linked_date and ep.get("date") in ("N/A",None,""):
+                ep["date"] = linked_date
 
             tidx = i * 2 + (0 if endpoint=="departure" else 1)
             if regex_built_segments and ep.get("terminal") in ("N/A",None,"") and tidx < len(terminals):
