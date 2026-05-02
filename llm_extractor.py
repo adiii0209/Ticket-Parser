@@ -191,7 +191,15 @@ MONTH_MAP = {
 CURRENCY_SYM = {"₹":"INR","$":"USD","€":"EUR","£":"GBP","¥":"JPY"}
 
 def _norm_date(day, mon, year):
-    m = MONTH_MAP.get(mon.lower().rstrip("."), mon[:3].capitalize())
+    mon_clean = mon.lower().rstrip(".")
+    if mon_clean.isdigit():
+        month_num = int(mon_clean)
+        if 1 <= month_num <= 12:
+            m = datetime(2000, month_num, 1).strftime("%b")
+        else:
+            m = mon[:3].capitalize()
+    else:
+        m = MONTH_MAP.get(mon_clean, mon[:3].capitalize())
     y = year.strip()
     if len(y) == 4: y = y[2:]
     return f"{int(day):02d} {m} {y}"
@@ -236,7 +244,7 @@ def _normalize_flight_candidate(
     airline: str | None = None,
     raw_candidate: str | None = None,
 ) -> str | None:
-    """Keep only plausible airline flight numbers, never aircraft types like A321."""
+    """Keep plausible flight numbers, even when the airline code is not in our mapping table."""
     if not flight or flight == "N/A":
         return None
 
@@ -252,10 +260,8 @@ def _normalize_flight_candidate(
     code = match.group(1)
     number = match.group(2)
     airline_name = AIRLINE_CODES.get(code)
-    if not airline_name:
-        return None
 
-    if airline and airline != "N/A":
+    if airline and airline != "N/A" and airline_name:
         if _normalize_airline_name(airline_name) != _normalize_airline_name(airline):
             return None
 
@@ -442,6 +448,68 @@ def _extract_structured_airport_events(text: str) -> list[dict]:
     return events
 
 
+def _extract_flight_schedule_rows(text: str) -> list[dict]:
+    """Extract explicit per-flight dep/arr schedule rows from nearby itinerary lines."""
+    rows: list[dict] = []
+    lines = [line.strip() for line in text.splitlines()]
+    seen = set()
+
+    for idx, line in enumerate(lines):
+        flight_match = _RE_FLIGHT.search(line)
+        if not flight_match:
+            continue
+
+        flight = _normalize_flight_candidate(
+            f"{flight_match.group(1).upper()} {flight_match.group(2)}",
+            raw_candidate=flight_match.group(0),
+        )
+        if not flight:
+            continue
+
+        window = []
+        for look_ahead, raw_window_line in enumerate(lines[idx:idx + 10]):
+            win_line = raw_window_line.strip()
+            if not win_line:
+                continue
+            if look_ahead > 0 and _RE_FLIGHT.search(win_line):
+                break
+            window.append(win_line)
+        if not window:
+            continue
+
+        times: list[str] = []
+        dates: list[str] = []
+        booking_class = None
+
+        for win_line in window:
+            for tm in _RE_TIME.finditer(win_line):
+                times.append(_to_24h(tm.group(1), tm.group(2), tm.group(3)))
+            for dm in _RE_DATE.finditer(win_line):
+                dates.append(_norm_date(dm.group(1), dm.group(2), dm.group(3)))
+            class_match = re.search(r"\bClass\s*:\s*[^,\n]+,\s*([A-Z])\b", win_line, re.IGNORECASE)
+            if class_match and not booking_class:
+                booking_class = class_match.group(1).upper()
+
+        if len(times) < 2 or len(dates) < 2:
+            continue
+
+        dedupe_key = (flight, times[0], dates[0], times[1], dates[1])
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+
+        rows.append({
+            "flight_number": flight,
+            "departure_time": times[0],
+            "departure_date": dates[0],
+            "arrival_time": times[1],
+            "arrival_date": dates[1],
+            "booking_class": booking_class,
+        })
+
+    return rows
+
+
 def _match_ordered_airport_events(segments: list[dict], airport_events: list[dict]) -> list[dict]:
     """Match repeated airports in sequence across multi-segment itineraries."""
     matched: list[dict] = []
@@ -526,10 +594,133 @@ def _validate_segment_dates_with_timezones(seg: dict, arr_event: dict | None = N
                     arr["date"] = repaired_date
                     seg["arrival"] = arr
 
+
+def _apply_explicit_schedule_to_segment(seg: dict, schedule_row: dict | None) -> None:
+    if not schedule_row:
+        return
+
+    dep = seg.get("departure", {})
+    arr = seg.get("arrival", {})
+
+    if schedule_row.get("departure_time"):
+        dep["time"] = schedule_row["departure_time"]
+    if schedule_row.get("departure_date"):
+        dep["date"] = schedule_row["departure_date"]
+    if schedule_row.get("arrival_time"):
+        arr["time"] = schedule_row["arrival_time"]
+    if schedule_row.get("arrival_date"):
+        arr["date"] = schedule_row["arrival_date"]
+
+    seg["departure"] = dep
+    seg["arrival"] = arr
+
+
+def _reverse_segment(seg: dict) -> dict:
+    swapped = dict(seg)
+    swapped["departure"] = dict(seg.get("arrival", {}))
+    swapped["arrival"] = dict(seg.get("departure", {}))
+    return swapped
+
+
+def _continuity_score(segments: list[dict], idx: int, candidate: dict) -> int:
+    score = 0
+    dep_airport = candidate.get("departure", {}).get("airport", "N/A")
+    arr_airport = candidate.get("arrival", {}).get("airport", "N/A")
+
+    if idx > 0:
+        prev_arr = segments[idx - 1].get("arrival", {}).get("airport", "N/A")
+        if prev_arr != "N/A" and dep_airport != "N/A" and prev_arr == dep_airport:
+            score += 1
+
+    if idx + 1 < len(segments):
+        next_dep = segments[idx + 1].get("departure", {}).get("airport", "N/A")
+        if arr_airport != "N/A" and next_dep != "N/A" and arr_airport == next_dep:
+            score += 1
+
+    dep_terminal = candidate.get("departure", {}).get("terminal", "N/A")
+    arr_terminal = candidate.get("arrival", {}).get("terminal", "N/A")
+    if dep_terminal not in (None, "", "N/A") and arr_terminal in (None, "", "N/A"):
+        score += 1
+
+    return score
+
+
+def _segment_orientation_bias(seg: dict) -> int:
+    score = 0
+    dep_terminal = seg.get("departure", {}).get("terminal", "N/A")
+    arr_terminal = seg.get("arrival", {}).get("terminal", "N/A")
+    if dep_terminal not in (None, "", "N/A") and arr_terminal in (None, "", "N/A"):
+        score += 1
+    return score
+
+
+def _pairwise_chain_score(left: dict, right: dict) -> int:
+    left_arr = left.get("arrival", {}).get("airport", "N/A")
+    right_dep = right.get("departure", {}).get("airport", "N/A")
+    if left_arr != "N/A" and right_dep != "N/A" and left_arr == right_dep:
+        return 3
+    return 0
+
+
+def _repair_segment_orientations(segments: list[dict]) -> list[dict]:
+    if len(segments) <= 1:
+        return [dict(seg) for seg in segments]
+
+    if len(segments) > 12:
+        repaired = [dict(seg) for seg in segments]
+        changed = True
+        while changed:
+            changed = False
+            for idx, seg in enumerate(repaired):
+                current_score = _continuity_score(repaired, idx, seg)
+                reversed_seg = _reverse_segment(seg)
+                reversed_score = _continuity_score(repaired, idx, reversed_seg)
+                if reversed_score > current_score:
+                    repaired[idx] = reversed_seg
+                    changed = True
+        return repaired
+
+    oriented_options = []
+    for seg in segments:
+        base = dict(seg)
+        flipped = _reverse_segment(seg)
+        oriented_options.append((base, flipped))
+
+    best_score = None
+    best_choice = None
+
+    for mask in range(1 << len(segments)):
+        choice = []
+        score = 0
+        for idx, (base, flipped) in enumerate(oriented_options):
+            seg_choice = flipped if (mask & (1 << idx)) else base
+            choice.append(seg_choice)
+            score += _segment_orientation_bias(seg_choice)
+            if idx > 0:
+                score += _pairwise_chain_score(choice[idx - 1], seg_choice)
+
+        if best_score is None or score > best_score:
+            best_score = score
+            best_choice = choice
+
+    return best_choice or [dict(seg) for seg in segments]
+
+
+def _revalidate_segments_after_repair(segments: list[dict], schedule_rows: dict[str, dict]) -> list[dict]:
+    for seg in segments:
+        flight_number = seg.get("flight_number")
+        schedule_row = schedule_rows.get(flight_number)
+        if schedule_row:
+            _apply_explicit_schedule_to_segment(seg, schedule_row)
+        _validate_segment_dates_with_timezones(seg, None)
+    return segments
+
 # ── patterns ──────────────────────────────────────────────────────────────────
 
 _RE_DATE = re.compile(
-    rf"\b(\d{{1,2}})[.\s\-/]({MONTH_ABBR})[.\s\-/](\d{{2,4}})\b", re.IGNORECASE)
+    rf"\b(\d{{1,2}})(?:[.\s\-/]?)(\d{{1,2}}|{MONTH_ABBR})(?:[.\s\-/]?)(\d{{2,4}})\b",
+    re.IGNORECASE,
+)
 _RE_TIME = re.compile(r"\b(\d{1,2}):(\d{2})\s*(AM|PM)?\b", re.IGNORECASE)
 _RE_PNR_AIRLINE = re.compile(r"\bAIRLINE\s*:\s*[A-Z0-9]{2}/([A-Z0-9]{5,8})\b", re.IGNORECASE)
 _RE_PNR_AIRLINE_LABEL = re.compile(
@@ -1109,6 +1300,7 @@ def regex_extract(text: str) -> dict:
     r["all_times"] = _extract_segment_times(text)
     r["airport_structured_events"] = _extract_structured_airport_events(text)
     r["airport_linked_events"] = _extract_airport_linked_events(text)
+    r["flight_schedule_rows"] = _extract_flight_schedule_rows(text)
     r["terminals"] = [m.group(1).upper() for m in _RE_TERMINAL.finditer(text)]
 
     m = _RE_BK_CLASS.search(text)
@@ -1194,18 +1386,29 @@ RULES:
   reporting, contact/support, and office-hours times even if they look valid.
 - Never derive or back-calculate departure/arrival time from flight duration, layover duration,
   elapsed time, or journey total. Times must be explicitly shown for that segment.
+- Tickets may be laid out vertically, side by side, in adjacent columns, or as split departure/arrival blocks.
+  Pair each departure block with its matching arrival block by row/visual order and segment continuity,
+  not by assuming every field appears one-per-line.
+- The ticket format may be free text, table, OCR-noisy, email body, PDF text dump, GDS output, airline template,
+  agency template, or a mixture of these. You must adapt to the presented format instead of expecting a fixed layout.
 - When a standalone time is followed by an airport-detail line like "CCU-..." or
   "BOM-...", treat that time as belonging to that airport segment.
 - For multi-segment, layover, or return itineraries, extract segment endpoints in travel order.
   Do not reuse the same time/date for different segments unless the ticket explicitly shows that same value twice.
 - When the same airport appears more than once across the itinerary, keep matching times/dates by sequence,
   not just by airport code.
+- Flight numbers may appear in a separate column, separate row, header band, or side-by-side with times.
+  Match the flight number to the correct segment using the local itinerary row/column context.
+- If a flight row explicitly shows `FLIGHT DEP_TIME DEP_DATE ARR_TIME ARR_DATE`, treat that row as authoritative
+  for that segment's departure and arrival timing once you have identified the correct route direction.
 - If a segment shows arrival on the next day or with a day offset like `+1`, assign the correct arrival date.
 - If an arrival time is earlier than the departure time and the ticket indicates overnight travel,
   keep the arrival date on the next calendar day rather than copying the departure date.
 - Validate dates using explicit day-offset markers first, then verify the segment timing order against
   the departure/arrival airport timezones. If the stated dates are impossible for that segment ordering,
   correct only the segment date that is clearly offset-driven; otherwise return "N/A" rather than guessing.
+- You may reason across neighboring lines/columns and explicit itinerary structure to pair fields,
+  but do not invent values that are not supported by the ticket text.
 - `duration_extracted` must always be "N/A". Do not extract or infer it from ticket text.
 - Departure/arrival terminals must be tied to the respective airport only.
   Never copy a terminal from the destination airport to the origin airport or vice versa.
@@ -1220,7 +1423,10 @@ RULES:
   Use ADT/CHD/INF, but do not guess from unrelated body text.
 - Seats: extract from the actual passenger/segment details using the ticket text.
   Do not rely on regex-only seat snippets when the segment/passenger mapping is explicit in the ticket.
-- class_of_travel: ONLY from fare/cabin/class labels. "Business Park" is NOT Business class.
+- class_of_travel and booking_class must be extracted from the ticket text by interpreting fare/cabin/class context.
+  Do not rely on a fixed label position. "Business Park" is NOT Business class.
+- booking_class may appear as a booking code, RBD, fare basis letter, class code, reservation class,
+  or adjacent to the flight row. Keep it segment-specific when available.
 - Ticket number -> full numeric string (10-14 digits) or "N/A"
 - Seats -> link to segment_index (0-based)
 - Passenger names: Clean up any LASTNAME/FIRSTNAME format to "Firstname Lastname".
@@ -1305,7 +1511,6 @@ OUTPUT SCHEMA (return exactly this structure):
 }
 """
 
-
 def llm_extract(raw_text: str, regex_hints: dict) -> dict:
     # Keep the LLM focused on raw itinerary text for segment timing.
     # Passing regex-collected times/fares can bias it toward booking/check-in
@@ -1328,8 +1533,6 @@ def llm_extract(raw_text: str, regex_hints: dict) -> dict:
     ]
     content = _call_llm(messages)
     return _parse_llm_json(content)
-
-
 def _call_llm(messages: list[dict]) -> str:
     headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
     payload = {
@@ -1440,10 +1643,10 @@ def merge(llm_data: dict, rx: dict) -> dict:
     bk = llm_data.get("booking", {})
     for field, key in [("pnr","pnr"),("booking_date","booking_date"),("phone","phone"),
                        ("currency","currency"),("grand_total","grand_total")]:
-        if rx.get(key) not in (None, "N/A"):
+        if bk.get(field) in (None, "", "N/A") and rx.get(key) not in (None, "N/A"):
             bk[field] = rx[key]
-    # Cabin class is only trusted from strict regex travel-context extraction.
-    bk["class_of_travel"] = rx.get("class_of_travel") if rx.get("class_of_travel") not in (None, "N/A") else "N/A"
+    if bk.get("class_of_travel") in (None, "", "N/A") and rx.get("class_of_travel") not in (None, "N/A"):
+        bk["class_of_travel"] = rx["class_of_travel"]
     for f, d in [("pnr","N/A"),("booking_date","N/A"),("phone","N/A"),
                  ("currency","N/A"),("grand_total",None),("class_of_travel","N/A")]:
         bk.setdefault(f, d)
@@ -1641,6 +1844,11 @@ def merge(llm_data: dict, rx: dict) -> dict:
     all_times = rx.get("all_times",[])
     airport_structured_events = rx.get("airport_structured_events", [])
     airport_linked_events = rx.get("airport_linked_events", [])
+    schedule_rows = {
+        row["flight_number"]: row
+        for row in rx.get("flight_schedule_rows", [])
+        if row.get("flight_number")
+    }
     terminals = rx.get("terminals",[])
     paren_ap  = rx.get("paren_airports",{})
 
@@ -1665,8 +1873,6 @@ def merge(llm_data: dict, rx: dict) -> dict:
                 seg["airline"] = _airline_from_code(ac) if ac else "N/A"
         seg.setdefault("flight_number","N/A")
         seg.setdefault("airline","N/A")
-        if rx.get("booking_class") and seg.get("booking_class") in ("N/A",None,""):
-            seg["booking_class"] = rx["booking_class"]
         seg.setdefault("booking_class","N/A")
         seg["duration_extracted"] = "N/A"
 
@@ -1680,13 +1886,11 @@ def merge(llm_data: dict, rx: dict) -> dict:
         arr_event = ordered_linked_events[i * 2 + 1] if i * 2 + 1 < len(ordered_linked_events) else {}
 
         # LLM remains the primary source for segment timings.
-        # Explicit structured regex blocks only verify/correct obviously wrong pairings.
+        # Explicit structured regex blocks only backfill missing values.
         if dep_structured.get("time") and dep_airport == dep_structured.get("airport"):
-            if dep_ep.get("time") in ("N/A", None, "") or dep_ep.get("time") != dep_structured.get("time"):
+            if dep_ep.get("time") in ("N/A", None, ""):
                 dep_ep["time"] = dep_structured["time"]
-            if dep_structured.get("date") and (
-                dep_ep.get("date") in ("N/A", None, "") or dep_ep.get("date") != dep_structured.get("date")
-            ):
+            if dep_structured.get("date") and dep_ep.get("date") in ("N/A", None, ""):
                 dep_ep["date"] = dep_structured["date"]
             if dep_structured.get("city") and dep_ep.get("city") in ("N/A", None, ""):
                 dep_ep["city"] = dep_structured["city"]
@@ -1694,11 +1898,9 @@ def merge(llm_data: dict, rx: dict) -> dict:
                 dep_ep["terminal"] = dep_structured["terminal"]
 
         if arr_structured.get("time") and arr_airport == arr_structured.get("airport"):
-            if arr_ep.get("time") in ("N/A", None, "") or arr_ep.get("time") != arr_structured.get("time"):
+            if arr_ep.get("time") in ("N/A", None, ""):
                 arr_ep["time"] = arr_structured["time"]
-            if arr_structured.get("date") and (
-                arr_ep.get("date") in ("N/A", None, "") or arr_ep.get("date") != arr_structured.get("date")
-            ):
+            if arr_structured.get("date") and arr_ep.get("date") in ("N/A", None, ""):
                 arr_ep["date"] = arr_structured["date"]
             if arr_structured.get("city") and arr_ep.get("city") in ("N/A", None, ""):
                 arr_ep["city"] = arr_structured["city"]
@@ -1745,9 +1947,13 @@ def merge(llm_data: dict, rx: dict) -> dict:
                           ("time","N/A"),("terminal","N/A")]:
                 ep.setdefault(f,d)
             seg[endpoint] = ep
+        if regex_built_segments:
+            schedule_row = schedule_rows.get(seg.get("flight_number"))
+            _apply_explicit_schedule_to_segment(seg, schedule_row)
+            _validate_segment_dates_with_timezones(seg, arr_structured or arr_event)
 
-        _validate_segment_dates_with_timezones(seg, arr_structured or arr_event)
-
+    segments = _repair_segment_orientations(segments)
+    segments = _revalidate_segments_after_repair(segments, schedule_rows)
     llm_data["segments"] = segments
     return llm_data
 
@@ -1969,6 +2175,17 @@ def classify_trip_type(legs: list) -> tuple:
     return "multi_city", f"Multi City{suffix}"
 
 
+def annotate_leg_types(legs: list, trip_type: str) -> list:
+    for idx, leg in enumerate(legs):
+        if trip_type == "one_way":
+            leg["leg_type"] = "outbound"
+        elif trip_type == "round_trip":
+            leg["leg_type"] = "outbound" if idx == 0 else "return"
+        else:
+            leg["leg_type"] = "outbound" if idx == 0 else "onward"
+    return legs
+
+
 # ── Step 5: Build unified journey output ──────────────────────────────────────
 
 def build_journey(data: dict) -> dict:
@@ -2009,6 +2226,7 @@ def build_journey(data: dict) -> dict:
 
     # 4. Classify
     trip_type, trip_display = classify_trip_type(legs)
+    legs = annotate_leg_types(legs, trip_type)
 
     # 5. Aggregate
     any_layovers = any(l["has_layovers"] for l in legs)
@@ -2298,7 +2516,7 @@ def _normalize_segment_index(value, segment_count: int) -> int:
 # SECTION 5 — FINAL ASSEMBLY
 # ══════════════════════════════════════════════════════════════════════════════
 
-PARSER_VERSION = "hybrid_v3.2"
+PARSER_VERSION = "hybrid_v3.3"
 
 
 def _validate(data):
@@ -2312,10 +2530,40 @@ def _validate(data):
         dep, arr = seg.get("departure",{}), seg.get("arrival",{})
         if dep.get("airport") == "N/A": warnings.append(f"Segment {i}: departure airport missing")
         if arr.get("airport") == "N/A": warnings.append(f"Segment {i}: arrival airport missing")
+        if dep.get("date") == "N/A" or dep.get("time") == "N/A":
+            warnings.append(f"Segment {i}: departure datetime incomplete")
+        if arr.get("date") == "N/A" or arr.get("time") == "N/A":
+            warnings.append(f"Segment {i}: arrival datetime incomplete")
         if dep.get("airport") == arr.get("airport") != "N/A":
             errors.append(f"Segment {i}: departure == arrival ({dep['airport']})")
+        flight = seg.get("flight_number")
+        if flight in (None, "", "N/A"):
+            warnings.append(f"Segment {i}: flight number missing")
         if seg.get("duration_calculated") == "N/A":
             warnings.append(f"Segment {i}: duration could not be calculated")
+
+    journey = data.get("journey", {})
+    legs = journey.get("legs", [])
+    for i, leg in enumerate(legs):
+        if leg.get("from") == "N/A" or leg.get("to") == "N/A":
+            warnings.append(f"Leg {i}: endpoints incomplete")
+        if leg.get("total_duration") == "N/A":
+            warnings.append(f"Leg {i}: total duration could not be calculated")
+
+    segments = data.get("segments", [])
+    for i in range(len(segments) - 1):
+        curr = segments[i]
+        nxt = segments[i + 1]
+        curr_arr = curr.get("arrival", {}).get("airport", "N/A")
+        next_dep = nxt.get("departure", {}).get("airport", "N/A")
+        if curr_arr != "N/A" and next_dep != "N/A" and curr_arr != next_dep:
+            warnings.append(f"Segments {i}->{i + 1}: airport discontinuity {curr_arr} -> {next_dep}")
+        curr_arr_dt = _parse_naive(curr.get("arrival", {}).get("date", "N/A"), curr.get("arrival", {}).get("time", "N/A"))
+        next_dep_dt = _parse_naive(nxt.get("departure", {}).get("date", "N/A"), nxt.get("departure", {}).get("time", "N/A"))
+        if curr_arr != "N/A" and next_dep != "N/A" and curr_arr == next_dep and curr_arr_dt and next_dep_dt:
+            if next_dep_dt < curr_arr_dt:
+                errors.append(f"Segments {i}->{i + 1}: next departure is earlier than previous arrival at {curr_arr}")
+
     for i, pax in enumerate(data.get("passengers", [])):
         if not pax.get("name") or pax["name"] == "N/A":
             errors.append(f"Passenger {i}: name missing")
