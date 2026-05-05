@@ -24,7 +24,7 @@ load_dotenv()
 
 try:
     from mappings import (AIRPORT_CODES, AIRLINE_CODES, AIRPORT_TZ_MAP,
-                          MEAL_CODES, ANCILLARY_CODES, resolve_booking_class)
+                          MEAL_CODES, ANCILLARY_CODES)
 except ImportError:
     raise RuntimeError("mappings.py not found. Place it in the same directory.")
 
@@ -222,6 +222,21 @@ def _clean_num(s):
 
 def _normalize_airline_name(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]", "", (value or "").lower())
+
+
+def _canonical_airline_name(value: str | None) -> str:
+    if not value or value == "N/A":
+        return "N/A"
+
+    normalized = _normalize_airline_name(value)
+    if not normalized:
+        return "N/A"
+
+    for airline_name in AIRLINE_CODES.values():
+        if _normalize_airline_name(airline_name) == normalized:
+            return airline_name
+
+    return re.sub(r"\s+", " ", str(value)).strip().title()
 
 
 def _looks_like_aircraft_designator(value: str | None) -> bool:
@@ -827,6 +842,17 @@ _RE_SERVICE_KEYWORD = re.compile(
     r"\b(?:meal|service|ssr|additional\s+services?|additional\s+bag|baggage|corporate\s+travell?er)\b",
     re.IGNORECASE,
 )
+_RE_PASSENGER_PHONE_CONTEXT = re.compile(
+    r"\b(?:adult|child|infant|passenger|pax|travell?er|customer|guest|profile|contact\s+number)\b",
+    re.IGNORECASE,
+)
+_RE_AGENCY_PHONE_CONTEXT = re.compile(
+    r"\b(?:agency|office|support|helpline|hotline|landline|tours?|travels?|tech|customer\s+care)\b",
+    re.IGNORECASE,
+)
+_RE_SEAT_TOKEN = re.compile(r"\b(\d{1,3}[A-Z]{1,2})\b", re.IGNORECASE)
+_RE_SEAT_SERVICE = re.compile(r"\bseat(?:\s*(?:selection|assign(?:ment)?|no\.?|number))?\b", re.IGNORECASE)
+_RE_BARCODE_NOISE = re.compile(r"\b(?:2d\s*barcode|barcode)\b", re.IGNORECASE)
 
 _PAX_MAP = {"adult":"ADT","adt":"ADT","child":"CHD","chd":"CHD","infant":"INF","inf":"INF"}
 _BLOCKED_TEXT_VALUES = {
@@ -837,8 +863,10 @@ _BLOCKED_TEXT_VALUES = {
 _BLOCKED_PHONE_DIGITS = {
     "9831020012",
     "9831020008",
+    "9433010416",
     "3340011333",
     "913340011333",
+    "919433010416",
     "919831020008",
     "919831020012",
 }
@@ -956,35 +984,109 @@ def _looks_like_customer_mobile(phone: str | None) -> bool:
     return len(digits) == 10 and digits[:1] in {"6", "7", "8", "9"}
 
 
-def _extract_phone(text: str) -> str | None:
-    candidates = []
-    seen = set()
-    for match in _RE_PHONE.finditer(text):
-        normalized = _normalize_phone_candidate(match.group(1))
-        if normalized == "N/A" or normalized in seen:
-            continue
-        seen.add(normalized)
-        candidates.append(normalized)
+def _score_phone_line(line: str) -> int:
+    score = 0
+    if _RE_PASSENGER_PHONE_CONTEXT.search(line):
+        score += 4
+    if "|" in line or "@" in line:
+        score += 2
+    if _RE_AGENCY_PHONE_CONTEXT.search(line):
+        score -= 5
+    return score
 
-    # Fallback for passenger/profile lines like: Adult | 9831020006 | mail@...
+
+def _extract_phone(text: str) -> str | None:
+    candidates: list[tuple[str, int]] = []
+    seen = set()
+
     for raw_line in text.splitlines():
         line = raw_line.strip()
-        if not line or not _INLINE_PHONE_CONTEXT.search(line):
+        if not line:
             continue
-        for match in _RE_INLINE_PHONE.finditer(line):
+
+        line_score = _score_phone_line(line)
+
+        for match in _RE_PHONE.finditer(line):
             normalized = _normalize_phone_candidate(match.group(1))
             if normalized == "N/A" or normalized in seen:
                 continue
             seen.add(normalized)
-            candidates.append(normalized)
+            candidates.append((normalized, line_score + 1))
+
+        if not _INLINE_PHONE_CONTEXT.search(line):
+            continue
+        for match in _RE_INLINE_PHONE.finditer(line):
+            if _RE_AGENCY_PHONE_CONTEXT.search(line):
+                continue
+            normalized = _normalize_phone_candidate(match.group(1))
+            if normalized == "N/A" or normalized in seen:
+                continue
+            seen.add(normalized)
+            candidates.append((normalized, line_score + 3))
 
     if not candidates:
         return None
 
-    for candidate in candidates:
+    candidates.sort(key=lambda item: (item[1], _looks_like_customer_mobile(item[0])), reverse=True)
+    for candidate, _score in candidates:
         if _looks_like_customer_mobile(candidate):
             return candidate
-    return candidates[0]
+    return candidates[0][0]
+
+
+def _normalize_class_of_travel(value: str | None) -> str:
+    return ""
+
+
+def _normalize_booking_class(value) -> str:
+    if value in (None, "", "N/A"):
+        return "N/A"
+
+    if isinstance(value, dict):
+        value = value.get("cabin") or value.get("full_form") or value.get("letter") or "N/A"
+
+    normalized = re.sub(r"\s+", " ", str(value)).strip()
+    if not normalized:
+        return "N/A"
+
+    if len(normalized) == 1 and normalized.isalpha():
+        return "N/A"
+
+    lowered = normalized.lower()
+    if "premium" in lowered and "economy" in lowered:
+        return "Premium Economy"
+    if "economy" in lowered:
+        return "Economy"
+    if "business" in lowered:
+        return "Business"
+    if "first" in lowered:
+        return "First"
+    return normalized.title()
+
+
+def _normalize_seat_candidate(value: str | None) -> str | None:
+    if not value:
+        return None
+
+    cleaned = re.sub(r"\s+", "", str(value)).upper().strip(" ,:/-")
+    if not cleaned or _RE_BARCODE_NOISE.search(cleaned):
+        return None
+    if cleaned == "2D":
+        return None
+    if not re.fullmatch(r"\d{1,3}[A-Z]{1,2}", cleaned):
+        return None
+    return cleaned
+
+
+def _extract_seat_from_text(value: str | None) -> str | None:
+    if not value:
+        return None
+    if _RE_BARCODE_NOISE.search(str(value)):
+        return None
+    match = _RE_SEAT_TOKEN.search(str(value).upper())
+    if not match:
+        return None
+    return _normalize_seat_candidate(match.group(1))
 
 
 def _is_probable_pnr(candidate: str | None) -> bool:
@@ -1048,7 +1150,23 @@ def _is_noise_name(name: str | None) -> bool:
 
 
 def _strip_title_prefix(name: str) -> str:
-    return re.sub(r"^(?:Mr|Mrs|Ms|Miss)\.?\s+", "", name.strip(), flags=re.IGNORECASE)
+    return re.sub(r"^(?:Mr|Mrs|Ms|Miss|Mstr)\.?\s+", "", name.strip(), flags=re.IGNORECASE)
+
+
+_TITLE_LABELS = {
+    "MR": "Mr",
+    "MRS": "Mrs",
+    "MS": "Ms",
+    "MISS": "Miss",
+    "MSTR": "Mstr",
+    "MASTER": "Mstr",
+}
+
+
+def _canonical_title(value: str | None) -> str | None:
+    if not value:
+        return None
+    return _TITLE_LABELS.get(value.upper())
 
 
 def _find_title_for_name(raw_text: str, name: str) -> str | None:
@@ -1066,28 +1184,25 @@ def _find_title_for_name(raw_text: str, name: str) -> str | None:
     tokens = [re.escape(t) for t in base_norm.split()]
     if tokens:
         name_pat = r"\s+".join(tokens)
-        m = re.search(rf"\b(MR|MRS|MS|MISS)\.?\s+{name_pat}\b", raw_text, re.IGNORECASE)
+        m = re.search(rf"\b(MR|MRS|MS|MISS|MSTR|MASTER)\.?\s+{name_pat}\b", raw_text, re.IGNORECASE)
         if m:
-            t = m.group(1).upper()
-            return {"MR": "Mr", "MRS": "Mrs", "MS": "Ms", "MISS": "Miss"}.get(t)
+            return _canonical_title(m.group(1))
 
     # Try "LAST/FIRST" with title prefix
     if len(tokens) >= 2:
         last = tokens[-1]
         first = tokens[0]
-        m = re.search(rf"\b(MR|MRS|MS|MISS)\.?\s+{last}\s*/\s*{first}\b", raw_text, re.IGNORECASE)
+        m = re.search(rf"\b(MR|MRS|MS|MISS|MSTR|MASTER)\.?\s+{last}\s*/\s*{first}\b", raw_text, re.IGNORECASE)
         if m:
-            t = m.group(1).upper()
-            return {"MR": "Mr", "MRS": "Mrs", "MS": "Ms", "MISS": "Miss"}.get(t)
+            return _canonical_title(m.group(1))
 
     # Try "LAST/FIRST" with title suffix
     if len(tokens) >= 2:
         last = tokens[-1]
         first = tokens[0]
-        m = re.search(rf"\b{last}\s*/\s*{first}\s+(MR|MRS|MS|MISS)\.?\b", raw_text, re.IGNORECASE)
+        m = re.search(rf"\b{last}\s*/\s*{first}\s+(MR|MRS|MS|MISS|MSTR|MASTER)\.?\b", raw_text, re.IGNORECASE)
         if m:
-            t = m.group(1).upper()
-            return {"MR": "Mr", "MRS": "Mrs", "MS": "Ms", "MISS": "Miss"}.get(t)
+            return _canonical_title(m.group(1))
 
     return None
 
@@ -1100,7 +1215,7 @@ def _apply_titles_from_text(data: dict, raw_text: str) -> None:
         if not name or name == "N/A":
             continue
         # If name already has a title, keep it
-        if re.match(r"^(?:Mr|Mrs|Ms|Miss)\.?\s+", name, re.IGNORECASE):
+        if re.match(r"^(?:Mr|Mrs|Ms|Miss|Mstr)\.?\s+", name, re.IGNORECASE):
             continue
         title = _find_title_for_name(raw_text, name)
         if title:
@@ -1128,7 +1243,7 @@ def _extract_pax_type(text):
         return [_PAX_MAP[m.group(1).lower()]]
 
     # Count passenger lines with titles
-    title_count = len(re.findall(r"\b(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+[A-Z]", text))
+    title_count = len(re.findall(r"\b(?:Mr|Mrs|Ms|Miss|Mstr|Master|Dr|Prof)\.?\s+[A-Z]", text))
     if title_count > 0:
         return ["ADT"] * title_count
 
@@ -1423,14 +1538,19 @@ RULES:
   Use ADT/CHD/INF, but do not guess from unrelated body text.
 - Seats: extract from the actual passenger/segment details using the ticket text.
   Do not rely on regex-only seat snippets when the segment/passenger mapping is explicit in the ticket.
-- class_of_travel and booking_class must be extracted from the ticket text by interpreting fare/cabin/class context.
-  Do not rely on a fixed label position. "Business Park" is NOT Business class.
-- booking_class may appear as a booking code, RBD, fare basis letter, class code, reservation class,
-  or adjacent to the flight row. Keep it segment-specific when available.
+- `class_of_travel` is intentionally blank. Always return `""` for that field.
+- `booking_class` is the segment class/cabin label extracted from the ticket text by the LLM.
+  Use values like Economy, Premium Economy, Business, First, or another explicit class label shown on the ticket.
+- Never treat fare-basis letters or raw booking-code letters such as Y/R/J/C/F as `booking_class` by themselves.
+- Do not rely on a fixed label position. "Business Park" is NOT Business class.
 - Ticket number -> full numeric string (10-14 digits) or "N/A"
 - Seats -> link to segment_index (0-based)
+- Ignore barcode labels such as `2D barcode`, `barcode`, or QR/barcode text when extracting seats.
+- If a seat-assignment service line contains an actual seat number, put it in `seats`, not in `ancillaries`.
 - Passenger names: Clean up any LASTNAME/FIRSTNAME format to "Firstname Lastname".
-  Remove extra slashes, numbers, or positioning artifacts. Output clean title-case names.
+  Remove extra slashes, numbers, or positioning artifacts. Output clean title-case names with title in front.
+- Preserve supported titles when visible: Mr, Mrs, Ms, Miss, Mstr.
+- Booking phone/contact should be the traveller/passenger mobile number when visible, not agency/office/support numbers.
 - Meals: Extract per-segment. Use 4-letter SSR codes (e.g. VGML, NVML, CPML, AVML, PTSW).
   If a meal code appears with a flight number, link it to the matching segment_index.
 - If a meal/service is visible but no reliable SSR code is shown, still return it with
@@ -1461,7 +1581,7 @@ OUTPUT SCHEMA (return exactly this structure):
     "phone": "string or N/A",
     "currency": "INR/USD/EUR/etc or N/A",
     "grand_total": number or null,
-    "class_of_travel": "Economy|Business|First|Premium Economy|N/A"
+    "class_of_travel": ""
   },
   "gst_details": {
     "gst_number": "15-char GSTIN or N/A",
@@ -1489,7 +1609,7 @@ OUTPUT SCHEMA (return exactly this structure):
     {
       "airline": "Full Airline Name or N/A",
       "flight_number": "XX 1234",
-      "booking_class": "string or N/A",
+      "booking_class": "class label string or N/A",
       "departure": {
         "city": "City Name or N/A",
         "airport": "XXX or N/A",
@@ -1641,14 +1761,13 @@ def _parse_llm_json(content: str) -> dict:
 
 def merge(llm_data: dict, rx: dict) -> dict:
     bk = llm_data.get("booking", {})
+    bk["class_of_travel"] = ""
     for field, key in [("pnr","pnr"),("booking_date","booking_date"),("phone","phone"),
                        ("currency","currency"),("grand_total","grand_total")]:
         if bk.get(field) in (None, "", "N/A") and rx.get(key) not in (None, "N/A"):
             bk[field] = rx[key]
-    if bk.get("class_of_travel") in (None, "", "N/A") and rx.get("class_of_travel") not in (None, "N/A"):
-        bk["class_of_travel"] = rx["class_of_travel"]
     for f, d in [("pnr","N/A"),("booking_date","N/A"),("phone","N/A"),
-                 ("currency","N/A"),("grand_total",None),("class_of_travel","N/A")]:
+                 ("currency","N/A"),("grand_total",None),("class_of_travel","")]:
         bk.setdefault(f, d)
     llm_data["booking"] = bk
 
@@ -1750,6 +1869,21 @@ def merge(llm_data: dict, rx: dict) -> dict:
         for ac in existing_anc:
             c = ac.get("code", "").upper()
             ac["segment_index"] = _normalize_segment_index(ac.get("segment_index", 0), len(segments))
+            seat_candidate = None
+            ac_name = ac.get("name", "")
+            if c == "SEAT" or _RE_SEAT_SERVICE.search(ac_name):
+                seat_candidate = _extract_seat_from_text(ac_name) or _extract_seat_from_text(c)
+            if seat_candidate:
+                pax.setdefault("seats", [])
+                if not any(
+                    s.get("segment_index") == ac.get("segment_index", 0) and s.get("seat_number") == seat_candidate
+                    for s in pax["seats"]
+                ):
+                    pax["seats"].append({
+                        "segment_index": ac.get("segment_index", 0),
+                        "seat_number": seat_candidate,
+                    })
+                continue
             if c in MEAL_CODES:
                 if not any(
                     m.get("segment_index") == ac.get("segment_index", 0) and m.get("code") == c
@@ -1778,10 +1912,24 @@ def merge(llm_data: dict, rx: dict) -> dict:
         pax["fare"] = fare
 
         # Seats are LLM-first; only use raw regex seat fallback when missing and unambiguous.
+        normalized_seats = []
+        for seat in pax.get("seats", []):
+            seat_number = _normalize_seat_candidate(seat.get("seat_number"))
+            if not seat_number:
+                continue
+            normalized_seats.append({
+                "segment_index": _normalize_segment_index(seat.get("segment_index", 0), len(segments)),
+                "seat_number": seat_number,
+            })
+        pax["seats"] = normalized_seats
         if rx.get("seats_raw") and not pax.get("seats"):
             if len(passengers) == 1:
-                pax["seats"] = [{"segment_index": j, "seat_number": s}
-                                for j, s in enumerate(rx["seats_raw"])]
+                pax["seats"] = [
+                    {"segment_index": j, "seat_number": seat_number}
+                    for j, s in enumerate(rx["seats_raw"])
+                    for seat_number in [_normalize_seat_candidate(s)]
+                    if seat_number
+                ]
         pax.setdefault("seats",[])
 
     # ── Merge regex SSR items into passengers ─────────────────────────────────
@@ -1873,7 +2021,7 @@ def merge(llm_data: dict, rx: dict) -> dict:
                 seg["airline"] = _airline_from_code(ac) if ac else "N/A"
         seg.setdefault("flight_number","N/A")
         seg.setdefault("airline","N/A")
-        seg.setdefault("booking_class","N/A")
+        seg["booking_class"] = _normalize_booking_class(seg.get("booking_class", "N/A"))
         seg["duration_extracted"] = "N/A"
 
         dep_ep = seg.get("departure", {})
@@ -2311,9 +2459,9 @@ def normalize_name(name: str) -> str:
 
     found_title_label = None
     # Allowed titles and their canonical forms
-    ALLOWED = {"MR": "Mr", "MRS": "Mrs", "MISS": "Miss", "MS": "Ms"}
+    ALLOWED = {"MR": "Mr", "MRS": "Mrs", "MISS": "Miss", "MS": "Ms", "MSTR": "Mstr", "MASTER": "Mstr"}
     # Titles we recognize to either keep or strip. \b before the optional dot.
-    TITLE_PAT = r"\b(MR|MRS|MS|MISS|DR|PROF|MSTR|MASTER|CAPT|REV|COL|SR|JR)\b\.?"
+    TITLE_PAT = r"\b(MR|MRS|MS|MISS|MSTR|MASTER|DR|PROF|CAPT|REV|COL|SR|JR)\b\.?"
 
     def _extract_titles(s):
         nonlocal found_title_label
@@ -2399,6 +2547,7 @@ def normalize_data(data: dict) -> dict:
     bk = data.get("booking", {})
     if bk.get("phone"):
         bk["phone"] = normalize_phone(bk["phone"])
+    bk["class_of_travel"] = ""
     data["booking"] = bk
 
     # ── Passengers: name, baggage, meals ──
@@ -2417,14 +2566,42 @@ def normalize_data(data: dict) -> dict:
                 ml["name"] = ml["name"].strip().title()
 
         # Normalize ancillaries array
+        normalized_ancillaries = []
         for ac in pax.get("ancillaries", []):
             ac["segment_index"] = _normalize_segment_index(ac.get("segment_index", 0), len(data.get("segments", [])))
             code = ac.get("code", "").upper()
+            seat_candidate = None
+            if code == "SEAT" or _RE_SEAT_SERVICE.search(ac.get("name", "")):
+                seat_candidate = _extract_seat_from_text(ac.get("name")) or _extract_seat_from_text(code)
+            if seat_candidate:
+                pax.setdefault("seats", [])
+                if not any(
+                    s.get("segment_index") == ac.get("segment_index", 0) and s.get("seat_number") == seat_candidate
+                    for s in pax["seats"]
+                ):
+                    pax["seats"].append({
+                        "segment_index": ac.get("segment_index", 0),
+                        "seat_number": seat_candidate,
+                    })
+                continue
             ac["code"] = code if code in ANCILLARY_CODES else "N/A"
             if code in ANCILLARY_CODES and ac.get("name") in (None, "", "N/A", code):
                 ac["name"] = ANCILLARY_CODES[code]
             elif ac.get("name"):
                 ac["name"] = ac["name"].strip().title()
+            normalized_ancillaries.append(ac)
+        pax["ancillaries"] = normalized_ancillaries
+
+        normalized_seats = []
+        for seat in pax.get("seats", []):
+            seat_number = _normalize_seat_candidate(seat.get("seat_number"))
+            if not seat_number:
+                continue
+            normalized_seats.append({
+                "segment_index": _normalize_segment_index(seat.get("segment_index", 0), len(data.get("segments", []))),
+                "seat_number": seat_number,
+            })
+        pax["seats"] = normalized_seats
 
         # ── Fare: Recalculate other_taxes ──
         # Formula: other_taxes = total_fare - k3_gst - base_fare
@@ -2459,7 +2636,7 @@ def normalize_data(data: dict) -> dict:
         # Normalize airline name
         airline = seg.get("airline", "N/A")
         if airline and airline != "N/A":
-            seg["airline"] = airline.strip().title()
+            seg["airline"] = _canonical_airline_name(airline)
             airline = seg["airline"]
 
         # Resolve booking class to full form
@@ -2473,13 +2650,7 @@ def normalize_data(data: dict) -> dict:
             al_code = seg["flight_number"].split()[0]
             seg["airline"] = _airline_from_code(al_code) or "N/A"
 
-        bk_cls = seg.get("booking_class", "N/A")
-        if bk_cls and bk_cls != "N/A" and len(bk_cls) == 1:
-            # Extract airline code from flight number to get airline-specific class
-            flt = seg.get("flight_number", "")
-            al_code = flt.split()[0] if flt and flt != "N/A" else None
-            resolved = resolve_booking_class(bk_cls, al_code)
-            seg["booking_class"] = resolved
+        seg["booking_class"] = _normalize_booking_class(seg.get("booking_class", "N/A"))
 
     return data
 
