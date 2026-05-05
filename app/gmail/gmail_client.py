@@ -88,6 +88,8 @@ def is_flight_email(subject: str, body: str, from_email: str) -> bool:
         for term in ("flight", "ticket", "itinerary", "booking", "pnr", "boarding pass", "e-ticket")
     )
 
+    if subject_has_flight_terms:
+        return True
     if has_airline_domain and (has_explicit_pnr or has_flight_number or has_airport_pair or strong_hits >= 2):
         return True
     if has_explicit_pnr and (has_flight_number or has_airport_pair or strong_hits >= 2):
