@@ -842,6 +842,18 @@ _RE_SERVICE_KEYWORD = re.compile(
     r"\b(?:meal|service|ssr|additional\s+services?|additional\s+bag|baggage|corporate\s+travell?er)\b",
     re.IGNORECASE,
 )
+_RE_ANCILLARY_SECTION_KEYWORD = re.compile(
+    r"\b(?:ancillar(?:y|ies)|additional\s+services?|services\s+purchased|special\s+services?|ssr|baggage)\b",
+    re.IGNORECASE,
+)
+_RE_ANCILLARY_NAME_HINT = re.compile(
+    r"\b(?:wheelchair|baggage|bag|lounge|priority|fast\s*track|fast\s*pass|seat|assist|assistance|pet|sports?\s+equipment|meet\s+and\s+assist)\b",
+    re.IGNORECASE,
+)
+_RE_ANCILLARY_PROSE_NOISE = re.compile(
+    r"\b(?:present|available|mentioned|request(?:ed)?|require(?:d|s)?|needs?|please|contact|phone|email|airport|ticket|booking|body\s+text)\b",
+    re.IGNORECASE,
+)
 _RE_PASSENGER_PHONE_CONTEXT = re.compile(
     r"\b(?:adult|child|infant|passenger|pax|travell?er|customer|guest|profile|contact\s+number)\b",
     re.IGNORECASE,
@@ -1078,6 +1090,35 @@ def _normalize_seat_candidate(value: str | None) -> str | None:
     return cleaned
 
 
+def _normalize_ancillary_name(value: str | None, code: str | None = None) -> str | None:
+    cleaned = _sanitize_blocked_text(value)
+    if not cleaned:
+        return None
+    if _RE_BARCODE_NOISE.search(cleaned):
+        return None
+
+    compact = re.sub(r"\s+", " ", cleaned).strip(" ,:/-")
+    upper = compact.upper()
+    if upper in {"N/A", "ANCILLARY", "ANCILLARIES", "SERVICE", "SERVICES", "SERVICES PURCHASED"}:
+        return None
+
+    if code and upper == code.upper() and code.upper() in ANCILLARY_CODES:
+        return ANCILLARY_CODES[code.upper()]
+
+    word_count = len(re.findall(r"[A-Za-z0-9]+", compact))
+    has_hint = bool(_RE_ANCILLARY_NAME_HINT.search(compact))
+    if not has_hint and code and code.upper() in ANCILLARY_CODES:
+        return ANCILLARY_CODES[code.upper()]
+    if not has_hint:
+        return None
+    if word_count > 6:
+        return None
+    if _RE_ANCILLARY_PROSE_NOISE.search(compact) and not code:
+        return None
+
+    return compact
+
+
 def _extract_seat_from_text(value: str | None) -> str | None:
     if not value:
         return None
@@ -1306,15 +1347,17 @@ def _extract_listed_service_items(text: str) -> list[dict]:
         line = raw_line.strip()
         if not line:
             continue
-        if not _RE_SERVICE_KEYWORD.search(line):
+        if not (_RE_SERVICE_KEYWORD.search(line) or _RE_ANCILLARY_SECTION_KEYWORD.search(line)):
             continue
 
         parts = [part.strip(" .:-") for part in re.split(r"[,|\t]+", line) if part.strip(" .:-")]
         if len(parts) < 2:
             continue
 
-        has_known_code = any(part.upper() in MEAL_CODES or part.upper() in ANCILLARY_CODES for part in parts)
-        if not has_known_code:
+        has_known_service_marker = any(
+            part.upper() in MEAL_CODES or part.upper() in ANCILLARY_CODES for part in parts
+        )
+        if not has_known_service_marker and not _RE_ANCILLARY_SECTION_KEYWORD.search(line):
             continue
 
         for part in parts:
@@ -1326,8 +1369,10 @@ def _extract_listed_service_items(text: str) -> list[dict]:
                 item = {"code": upper, "name": MEAL_CODES[upper], "type": "meal", "flight": None, "date": None, "passenger": None}
             elif upper in ANCILLARY_CODES:
                 item = {"code": upper, "name": ANCILLARY_CODES[upper], "type": "ancillary", "flight": None, "date": None, "passenger": None}
-            elif re.search(r"\b(?:bag|baggage|travell?er)\b", token, re.IGNORECASE):
-                item = {"code": "N/A", "name": token, "type": "ancillary", "flight": None, "date": None, "passenger": None}
+            else:
+                ancillary_name = _normalize_ancillary_name(token)
+                if ancillary_name:
+                    item = {"code": "N/A", "name": ancillary_name, "type": "ancillary", "flight": None, "date": None, "passenger": None}
 
             if not item:
                 continue
@@ -1339,6 +1384,28 @@ def _extract_listed_service_items(text: str) -> list[dict]:
             items.append(item)
 
     return items
+
+
+def _extract_ancillary_service_lines(text: str) -> list[str]:
+    lines = []
+    seen = set()
+    for raw_line in text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line:
+            continue
+        upper = line.upper()
+        if not (
+            _RE_ANCILLARY_SECTION_KEYWORD.search(line)
+            or any(code in upper for code in ANCILLARY_CODES)
+        ):
+            continue
+        if line in seen:
+            continue
+        seen.add(line)
+        lines.append(line)
+        if len(lines) >= 20:
+            break
+    return lines
 
 
 def regex_extract(text: str) -> dict:
@@ -1443,6 +1510,7 @@ def regex_extract(text: str) -> dict:
     r["gst_company_name"] = gst_company
 
     # ── SSR / Meal / Ancillary service codes ──────────────────────────────────
+    r["ancillary_service_lines"] = _extract_ancillary_service_lines(text)
     ssr_items = []
     for m in _RE_SSR_LINE.finditer(text):
         code = m.group(1).upper()
@@ -1557,9 +1625,10 @@ RULES:
   code = "N/A" and the best clean service name.
 - Ancillaries: Extract per-segment per-passenger. Include wheelchair (WCHR/WCHS/WCHC),
   extra baggage (XBAG), fast-track (FAST), lounge (LOUG), seat selection (SEAT), etc.
-  Use the 4-letter SSR/service code.
-- If an ancillary/service is visible but no reliable SSR code is shown, still return it with
-  code = "N/A" and the best clean service name.
+  Use the dedicated ancillary/additional-services content from the ticket when present.
+  If a 4-letter SSR/service code is shown, keep that code exactly as-is.
+  If no code is shown but the ticket shows the ancillary full form, return that exact ancillary name.
+  Do not create ancillaries from unrelated body text just because words like wheelchair appear elsewhere.
 - GST details: Extract ONLY from GST Information section. The GST company name is the
   company registered under GST, NOT the travel agency or booking office name.
 - Barcode -> raw string if visible, else null
@@ -1895,9 +1964,14 @@ def merge(llm_data: dict, rx: dict) -> dict:
                         "name": ac.get("name") if ac.get("name") not in (None, "", "N/A", c) else MEAL_CODES[c],
                     })
                 continue
+            normalized_name = _normalize_ancillary_name(ac.get("name"), c if c in ANCILLARY_CODES else None)
+            if c not in ANCILLARY_CODES and not normalized_name:
+                continue
             ac["code"] = c if c in ANCILLARY_CODES else "N/A"
-            if c in ANCILLARY_CODES and ac.get("name") in (None, "", "N/A", c):
+            if c in ANCILLARY_CODES and not normalized_name:
                 ac["name"] = ANCILLARY_CODES[c]
+            else:
+                ac["name"] = normalized_name
             normalized_anc.append(ac)
         pax["ancillaries"] = normalized_anc
 
@@ -2584,11 +2658,11 @@ def normalize_data(data: dict) -> dict:
                         "seat_number": seat_candidate,
                     })
                 continue
+            normalized_name = _normalize_ancillary_name(ac.get("name"), code if code in ANCILLARY_CODES else None)
+            if code not in ANCILLARY_CODES and not normalized_name:
+                continue
             ac["code"] = code if code in ANCILLARY_CODES else "N/A"
-            if code in ANCILLARY_CODES and ac.get("name") in (None, "", "N/A", code):
-                ac["name"] = ANCILLARY_CODES[code]
-            elif ac.get("name"):
-                ac["name"] = ac["name"].strip().title()
+            ac["name"] = normalized_name or ANCILLARY_CODES.get(code)
             normalized_ancillaries.append(ac)
         pax["ancillaries"] = normalized_ancillaries
 
