@@ -24,7 +24,7 @@ load_dotenv()
 
 try:
     from mappings import (AIRPORT_CODES, AIRLINE_CODES, AIRPORT_TZ_MAP,
-                          MEAL_CODES, ANCILLARY_CODES)
+                          MEAL_CODES, ANCILLARY_CODES, resolve_booking_class)
 except ImportError:
     raise RuntimeError("mappings.py not found. Place it in the same directory.")
 
@@ -1050,7 +1050,7 @@ def _normalize_class_of_travel(value: str | None) -> str:
     return ""
 
 
-def _normalize_booking_class(value) -> str:
+def _normalize_booking_class(value, airline_code: str = None) -> str:
     if value in (None, "", "N/A"):
         return "N/A"
 
@@ -1061,8 +1061,12 @@ def _normalize_booking_class(value) -> str:
     if not normalized:
         return "N/A"
 
+    # If it's a single letter, try to resolve it
     if len(normalized) == 1 and normalized.isalpha():
-        return "N/A"
+        resolved = resolve_booking_class(normalized, airline_code)
+        if resolved.get("cabin") != "N/A":
+            return resolved["cabin"]
+        return normalized.upper()
 
     lowered = normalized.lower()
     if "premium" in lowered and "economy" in lowered:
@@ -1708,7 +1712,18 @@ def llm_extract(raw_text: str, regex_hints: dict) -> dict:
     llm_hint_payload = {
         k: v
         for k, v in regex_hints.items()
-        if k not in {"all_times", "base_fare", "k3_gst", "other_taxes", "total_fare", "ssr_items", "terminals"}
+        if k not in {
+            "all_times",
+            "base_fare",
+            "k3_gst",
+            "other_taxes",
+            "total_fare",
+            "ssr_items",
+            "terminals",
+            "booking_class",
+            "seats_raw",
+            "ancillary_service_lines",
+        }
         and v not in (None, [], {}, "N/A")
     }
     hint_block = (
@@ -1996,56 +2011,9 @@ def merge(llm_data: dict, rx: dict) -> dict:
                 "seat_number": seat_number,
             })
         pax["seats"] = normalized_seats
-        if rx.get("seats_raw") and not pax.get("seats"):
-            if len(passengers) == 1:
-                pax["seats"] = [
-                    {"segment_index": j, "seat_number": seat_number}
-                    for j, s in enumerate(rx["seats_raw"])
-                    for seat_number in [_normalize_seat_candidate(s)]
-                    if seat_number
-                ]
         pax.setdefault("seats",[])
 
     # ── Merge regex SSR items into passengers ─────────────────────────────────
-    ssr_items = rx.get("ssr_items", [])
-    for ssr in ssr_items:
-        # Determine target segment_index from flight number
-        seg_idx = 0
-        if ssr.get("flight"):
-            fn_key = ssr["flight"].replace(" ", "")
-            seg_idx = flt_to_seg.get(fn_key, 0)
-
-        # Determine target passenger (try to match by name; if ambiguous, do not broadcast on multi-pax bookings)
-        target_pax_indices = [0] if len(passengers) == 1 else []
-        if ssr.get("passenger"):
-            pax_name_lower = ssr["passenger"].strip().lower()
-            for pi, p in enumerate(passengers):
-                pn = p.get("name", "").lower()
-                if pax_name_lower in pn or pn in pax_name_lower:
-                    target_pax_indices = [pi]
-                    break
-
-        code = ssr["code"]
-        for pi in target_pax_indices:
-            pax = passengers[pi]
-            if ssr["type"] == "meal":
-                # Don't add duplicates
-                if not any(m.get("code") == code and m.get("segment_index") == seg_idx
-                           for m in pax["meals"]):
-                    pax["meals"].append({
-                        "segment_index": seg_idx,
-                        "code": code,
-                        "name": ssr["name"],
-                    })
-            else:  # ancillary
-                if not any(a.get("code") == code and a.get("segment_index") == seg_idx
-                           for a in pax["ancillaries"]):
-                    pax["ancillaries"].append({
-                        "segment_index": seg_idx,
-                        "code": code,
-                        "name": ssr["name"],
-                    })
-
     llm_data["passengers"] = passengers
 
     regex_built_segments = False
@@ -2095,7 +2063,8 @@ def merge(llm_data: dict, rx: dict) -> dict:
                 seg["airline"] = _airline_from_code(ac) if ac else "N/A"
         seg.setdefault("flight_number","N/A")
         seg.setdefault("airline","N/A")
-        seg["booking_class"] = _normalize_booking_class(seg.get("booking_class", "N/A"))
+        al_code = seg["flight_number"].split()[0] if seg.get("flight_number") not in ("N/A", None, "") else None
+        seg["booking_class"] = _normalize_booking_class(seg.get("booking_class", "N/A"), al_code)
         seg["duration_extracted"] = "N/A"
 
         dep_ep = seg.get("departure", {})
@@ -2724,7 +2693,8 @@ def normalize_data(data: dict) -> dict:
             al_code = seg["flight_number"].split()[0]
             seg["airline"] = _airline_from_code(al_code) or "N/A"
 
-        seg["booking_class"] = _normalize_booking_class(seg.get("booking_class", "N/A"))
+        al_code = seg["flight_number"].split()[0] if seg.get("flight_number") not in ("N/A", None, "") else None
+        seg["booking_class"] = _normalize_booking_class(seg.get("booking_class", "N/A"), al_code)
 
     return data
 

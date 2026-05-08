@@ -6,6 +6,7 @@ import fitz  # PyMuPDF
 from app.forwarder.query_client import notify_processing_batch, send_to_query_system
 from app.gmail.auth import get_gmail_service
 from app.parser.attachment_extractor import extract_pdf_attachment
+from gds_iep_parser import try_gds_iep_parse
 from indigo_parser import try_indigo_parse
 from llm_extractor import extract as parse_ticket_llm, _extract_pnr
 from gds_parser import try_gds_parse
@@ -134,9 +135,13 @@ def process_single_email(email):
         if parsed_ticket is not None:
             print("[PROCESSOR] Ticket parsed successfully via IndiGo parser (no LLM)", flush=True)
         else:
-            parsed_ticket = try_gds_parse(raw_text)
+            parsed_ticket = try_gds_iep_parse(raw_text)
             if parsed_ticket is not None:
-                print("[PROCESSOR] Ticket parsed successfully via GDS parser (no LLM)", flush=True)
+                print("[PROCESSOR] Ticket parsed successfully via GDS-IEP parser (no LLM)", flush=True)
+            else:
+                parsed_ticket = try_gds_parse(raw_text)
+                if parsed_ticket is not None:
+                    print("[PROCESSOR] Ticket parsed successfully via GDS parser (no LLM)", flush=True)
         if parsed_ticket is None:
             parsed_ticket = parse_ticket_llm(raw_text)
             print("[PROCESSOR] Ticket parsed successfully via LLM (or fallback)", flush=True)

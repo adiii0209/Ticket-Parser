@@ -307,17 +307,18 @@ _MONTHS = r'(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)'
 # DEP line pattern — matches lines like:
 #  CASABLANCA      TK 618  C  27MAR  1645     CBRT                      2PC  OK
 _RE_DEP = re.compile(
-    r'^[ \t]{1,3}'
+    r'^[ 	]{1,3}'
     r'([A-Z][A-Z \'\-]{2,45}?)'         # dep city
-    r'[ \t]+'                            # gap (some PIRs use a single space here)
+    r'[ 	]+'                            # gap
     r'([A-Z0-9]{2})\s+'                 # airline code
     r'(\d{1,4}[A-Z]?)\s+'              # flight number
     r'([A-Z])\s+'                       # booking class
     r'(\d{1,2}(?:' + _MONTHS + r'))\s+' # date DDMON
     r'(\d{4})\s+'                       # dep time HHMM
-    r'([A-Z0-9]+)'                      # fare basis
-    r'(?:\s+.*?)?'                      # NVB/NVA (optional, greedy)
-    r'(\d+(?:K[Gg]?|PC|pc))\s+'        # baggage
+    r'([A-Z0-9/]+)'                     # fare basis
+    r'(?:\s+.*?)?'                      # optional NVB/NVA
+    r'\s+'                               # space before baggage
+    r'(\d+(?:K[Gg]?|PC|pc|L|LB)?|NIL)\s+' # baggage
     r'(OK|HK|RR|HL|WL|TK|KL|DK|UN)',  # status
     re.MULTILINE | re.I
 )
@@ -827,7 +828,7 @@ def _extract_gds(text: str) -> Dict:
             "phone": phone,
             "currency": fare_currency,
             "grand_total": grand_t,
-            "class_of_travel": class_of_travel,
+            "class_of_travel": "",
         },
         "gst_details": {"gst_number": gst_number, "company_name": gst_company},
         "passengers": passengers,
