@@ -324,7 +324,7 @@ MEAL_CODES = {
     "VCSW": "Veg Sandwich + Beverage",
     "NUSW": "Non-Veg Sandwich + Beverage",
     "NVML": "Non-Veg Meal",
-    "CPML": "Complimentary Meal",
+    "CPML": "6E Curated Snack Bag",
     "AVML": "Asian Vegetarian Meal",
     "HNML": "Hindu Non-Vegetarian Meal",
     "VLML": "Vegetarian Lacto-Ovo Meal",
