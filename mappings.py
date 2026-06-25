@@ -378,6 +378,9 @@ MEAL_CODES = {
     "CHSS": "Chicken Supreme Salad",
     "CHCT": "Chicken Cucumber Tomato Sandwich (New)",
     "CHCI": "Chicken Cucumber Tomato Sandwich",
+    "Veg Biryani with beverage": "Veg Biryani + Beverage",
+    "Rava Upma with beverage": "Rava Upma + Beverage",
+    "Cheese and veg sub with Dried fruits with beverage-INT": "Cheese and veg sub with Dried fruits with beverage-INT",
 }
 
 ANCILLARY_CODES = {

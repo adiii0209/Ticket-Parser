@@ -29,7 +29,7 @@ _RE_TICKET = re.compile(
 )
 _RE_FLIGHT_HEADER = re.compile(
     r"^FLIGHT\s+([A-Z0-9]{2})\s+(\d{1,4})\s*-\s*([A-Z][A-Z\s().,&'-]+?)\s+"
-    r"(?:MON|TUE|WED|THU|FRI|SAT|SUN)\s+(\d{2}\s+[A-Z]{3}\s+\d{4})\s*$",
+    r"(?:MON|TUE|WED|THU|FRI|SAT|SUN)\s+(\d{2}\s+[A-Z]{3,9}\s+\d{4})\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 _RE_LOCATION = re.compile(
