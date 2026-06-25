@@ -22,10 +22,11 @@ _RE_ISSUING_AIRLINE = re.compile(r"^\s*([A-Z][A-Z\s().,&'-]+?)\s+\(PB\s*\d+\)", 
 _RE_PNR = re.compile(r"BOOKING\s+REF:\s*([A-Z0-9]{5,8})", re.IGNORECASE)
 _RE_BOOKING_DATE = re.compile(r"DATE:\s*(\d{2}\s+[A-Z]{3}\s+\d{4})", re.IGNORECASE)
 _RE_PHONE = re.compile(r"TELEPHONE:\s*([+\d][\d\s()\-]+)", re.IGNORECASE)
-_RE_PAX_LINE = re.compile(r"\b([A-Z]+/[A-Z]+(?:\s+(?:MR|MRS|MS|MISS|MSTR))?)\b", re.IGNORECASE)
+_name_pattern = r"[A-Z][A-Z.-]*(?: [A-Z.-]+)*"
+_RE_PAX_LINE = re.compile(rf"\b({_name_pattern}/{_name_pattern}(?:\s+(?:MR|MRS|MS|MISS|MSTR))?)$", re.IGNORECASE | re.MULTILINE)
 _RE_TICKET = re.compile(
-    r"TICKET:\s*[A-Z0-9]+/ETKT\s*(\d{3})\s*(\d{10})\s+FOR\s+([A-Z]+/[A-Z]+(?:\s+(?:MR|MRS|MS|MISS|MSTR))?)",
-    re.IGNORECASE,
+    rf"TICKET:\s*[A-Z0-9]+/ETKT\s*(\d{{3}})\s*(\d{{10}})(?:\s+FOR\s+({_name_pattern}/{_name_pattern}(?:\s+(?:MR|MRS|MS|MISS|MSTR))?))?$",
+    re.IGNORECASE | re.MULTILINE,
 )
 _RE_FLIGHT_HEADER = re.compile(
     r"^FLIGHT\s+([A-Z0-9]{2})\s+(\d{1,4})\s*-\s*([A-Z][A-Z\s().,&'-]+?)\s+"
@@ -72,13 +73,16 @@ def _normalize_phone(raw: str | None) -> str:
 
 def _format_passenger_name(raw: str) -> str:
     raw = re.sub(r"\s+", " ", raw.strip())
-    parts = raw.split()
-    core = parts[0]
-    title = parts[1].title() if len(parts) > 1 else ""
-    if "/" not in core:
+    if "/" not in raw:
         return raw.title()
-
-    last, first = core.split("/", 1)
+        
+    last, rest = raw.split("/", 1)
+    rest_parts = rest.split()
+    title = ""
+    if len(rest_parts) > 1 and rest_parts[-1].upper() in ("MR", "MRS", "MS", "MISS", "MSTR"):
+        title = rest_parts.pop(-1).title()
+    
+    first = " ".join(rest_parts)
     return " ".join(part for part in [title, first.title(), last.title()] if part).strip()
 
 
@@ -150,9 +154,12 @@ def _extract_iep(text: str) -> Dict:
     unnamed_tickets: List[str] = []
     for match in _RE_TICKET.finditer(text):
         ticket_number = f"{match.group(1)}{match.group(2)}"
-        ticket_name_key = _passenger_name_key(match.group(3))
-        tickets_by_name[ticket_name_key] = ticket_number
-        unnamed_tickets.append(ticket_number)
+        raw_name = match.group(3)
+        if raw_name:
+            ticket_name_key = _format_passenger_name(raw_name)
+            tickets_by_name[ticket_name_key] = ticket_number
+        else:
+            unnamed_tickets.append(ticket_number)
 
     segments: List[Dict] = []
     segment_meals: List[str] = []
@@ -221,7 +228,7 @@ def _extract_iep(text: str) -> Dict:
 
     fallback_tickets = iter(unnamed_tickets)
     for passenger_name in passenger_names or ["N/A"]:
-        ticket_number = tickets_by_name.get(_passenger_name_key(passenger_name))
+        ticket_number = tickets_by_name.get(passenger_name)
         if not ticket_number:
             ticket_number = next(fallback_tickets, "N/A")
 
