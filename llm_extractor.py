@@ -594,8 +594,8 @@ def _validate_segment_dates_with_timezones(seg: dict, arr_event: dict | None = N
     if dep_naive is None or arr_naive is None:
         return
 
-    dep_tz = AIRPORT_TZ_MAP.get(dep_airport.upper(), "UTC")
-    arr_tz = AIRPORT_TZ_MAP.get(arr_airport.upper(), "UTC")
+    dep_tz = AIRPORT_TZ_MAP.get(dep_airport.upper(), "Asia/Kolkata")
+    arr_tz = AIRPORT_TZ_MAP.get(arr_airport.upper(), "Asia/Kolkata")
     dep_utc = _to_utc(dep_naive, dep_tz)
     arr_utc = _to_utc(arr_naive, arr_tz)
 
@@ -2187,8 +2187,8 @@ def _calc_single_duration(dep_airport, dep_date, dep_time, arr_airport, arr_date
     if dep_naive is None or arr_naive is None:
         return "N/A", None, None
 
-    dep_tz = AIRPORT_TZ_MAP.get(dep_airport.upper(), "UTC")
-    arr_tz = AIRPORT_TZ_MAP.get(arr_airport.upper(), "UTC")
+    dep_tz = AIRPORT_TZ_MAP.get(dep_airport.upper(), "Asia/Kolkata")
+    arr_tz = AIRPORT_TZ_MAP.get(arr_airport.upper(), "Asia/Kolkata")
 
     dep_utc = _to_utc(dep_naive, dep_tz)
     arr_utc = _to_utc(arr_naive, arr_tz)

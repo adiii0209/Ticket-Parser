@@ -815,7 +815,7 @@ def get_airline_name(code):
 # Helper function to get timezone
 def get_airport_timezone(code):
     """Get IANA timezone for airport"""
-    return AIRPORT_TZ_MAP.get(code.upper(), "UTC")
+    return AIRPORT_TZ_MAP.get(code.upper(), "Asia/Kolkata")
 
 # Search function for airport code
 def search_airport_code(code):
